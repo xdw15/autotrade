@@ -1,12 +1,13 @@
 import sys
 import logging
 from libs.data_handler import DataHandlerCSV
+from libs.config import work_path
 
 logger = logging.getLogger('autotrade')
 logger.setLevel(logging.DEBUG)
 log_FileHandler = logging.FileHandler(
-    filename='Z:/Benchmarking/py_integra'
-    + f'/PyCharmProjects/autotrade/{__name__}scratchbutno.log',
+    filename= work_path
+    + f'/{__name__}scratchbutno.log',
     mode='w',
     encoding='UTF-8'
 )
@@ -27,12 +28,12 @@ csvinfo = {
     'Equity': [
         {
             'Ticker': 'QQQ',
-            'path': r"Z:\Benchmarking\py_integra\PyCharmProjects\autotrade\archivosvarios\QQQ.csv",
+            'path': work_path + "/archivosvarios/QQQ.csv",
             'col_names': {'date': 'date', 'price': 'average'}
         },
         {
             'Ticker': 'AAPL',
-            'path': r"Z:\Benchmarking\py_integra\PyCharmProjects\autotrade\archivosvarios\AAPL.csv",
+            'path': work_path + "/archivosvarios/AAPL.csv",
             'col_names': {'date': 'date', 'price': 'average'}
         },
     ]

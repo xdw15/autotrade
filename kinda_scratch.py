@@ -2,7 +2,7 @@ import threading
 import time
 import datetime as dt
 import logging
-
+from libs.config import work_path
 
 class LogRecordNs(logging.LogRecord):
     def __init__(self, *args, **kwargs):
@@ -31,7 +31,7 @@ logger = logging.getLogger('logger_scratch12')
 logger.setLevel(logging.DEBUG)
 
 log_handler_file = logging.FileHandler(
-    filename=r'Z:\Benchmarking\py_integra\PyCharmProjects\autotrade\scratch12log.log',
+    filename=work_path + '/scratch12log.log',
     encoding='UTF-8',
     mode='w'
 )
@@ -101,9 +101,9 @@ logger.debug('pre finished')
 # quit_flag.set()
 
 with quit_lock as lockeado:
-    print(lockeado)
-    time.sleep(10)
-    quit_flag = True
+    print(f'quit lock esta lockeado: {lockeado}')
+    time.sleep(3)
+    #quit_flag = True
 
 # def stopper():
 #     with quit_lock:
