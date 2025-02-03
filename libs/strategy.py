@@ -86,7 +86,15 @@ class DumbStrat:
             queue=self.queue_names['data_handler'],
             on_message_callback=self.rabbitmq_callback
         )
-        self.kill_switch['data_handler'] = rab_con
+
+        def consumer_killer():
+            rab_con.connection.add_callback_threadsafe(
+                rab_con.connection.close
+            )
+
+            print(f'the connection was closed: {rab_con.connection.is_closed=}')
+
+        self.kill_switch['data_handler'] = consumer_killer
         rab_con.channel.start_consuming()
 
     def rabbitmq_callback(self,channel, method, properties, body):

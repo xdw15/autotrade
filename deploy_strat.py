@@ -12,4 +12,4 @@ dumb_strat.endpoint_data_handler(
     routing_key='data_csv.Equity'
 )
 
-dumb_strat.kill_switch['data_handler'].connection.close()
+dumb_strat.kill_switch['data_handler']()
