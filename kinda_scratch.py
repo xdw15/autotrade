@@ -82,7 +82,7 @@ def fun_normal():
 t1 = threading.Thread(target=fun_dae, args=())
 t2 = threading.Thread(target=fun_normal, args=())
 
-t1.daemon = True
+t1.daemon = False
 # t2.daemon = True
 logger.debug(f'main thread is daemon: {threading.current_thread().daemon}')
 

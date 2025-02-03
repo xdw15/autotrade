@@ -3,6 +3,12 @@ from abc import ABC, abstractmethod
 import polars as pl
 # import pika
 import time
+import threading
+
+#from ib_async import Contract
+#from pyarrow import timestamp
+
+from libs.config import work_path
 
 logger = logging.getLogger('autotrade.' + __name__)
 
@@ -73,7 +79,7 @@ class DataHandlerApp(ABC):
         pass
 
 
-class DataHandlerCSV:
+class DataAPICSV:
     """
     replicates a live daily trading session
     """
@@ -178,49 +184,132 @@ class DataHandlerCSV:
         print('Connected to CSV Feed')
 
     def client_datafeed(self,
-                        pulse: int,
+                        pulse: int = 1,
                         data_type_to_consume: list = None,
                         ):
 
         # Create Connection
-        from libs.rabs.rabfile import RabbitConCSV
+        # from libs.rabfile import RabbitConCSV
 
-        rabcon = RabbitConCSV()
+        # rabcon = RabbitConCSV()
 
         data_type_to_consume = data_type_to_consume or self.consumable_data.keys()
 
-        for ts in self.time_stamps:
+        def synthetic_stream(pulse_synt):
 
-            sent_data = {}
-            for tipo_data in data_type_to_consume:
+            for ts in self.time_stamps:
 
-                sent_data[tipo_data] = (
-                    self.consumable_data[tipo_data]
-                    .filter(
-                        pl.col('date') == ts
+                sent_data = {}
+                for tipo_data in data_type_to_consume:
+
+                    sent_data[tipo_data] = (
+                        self.consumable_data[tipo_data]
+                        .filter(
+                            pl.col('date') == ts
+                        )
                     )
+
+                    # rabcon.produce(
+                    #     body=f'''
+                    #     {ts}___{tipo_data}
+                    #                 ''',
+                    #     routing_key=f'data_csv.{tipo_data}'
+                    # )
+
+                yield sent_data
+                #logger.debug(f"sent_data {ts.strftime('%c')}")
+
+                time.sleep(pulse_synt)
+        return synthetic_stream
+
+class DataHandlerPrimer:
+
+    def __init__(self,
+                 data_base_connections : dict,
+                 ):
+
+        # assume the connection is just a path where to store the parquets
+        # it will check if the path exists
+        from os import path as os_path
+
+        self.db_connection = {}
+        securities_supported = ['Equity']
+
+        for security, connection in data_base_connections.items():
+
+            if security in securities_supported:
+                if os_path.exists(connection):
+                    self.db_connection[security] = connection
+                else:
+                    logger.error(f'data base path not found for security: {security}')
+                    raise Exception(f'data base path not found for security: {security}')
+            else:
+                logger.error(f"Security: '{security}' not supported")
+                raise Exception(f"Security: '{security}' not supported")
+
+        self.kill_keys = {}
+
+    def _setup_endpoint_csv(self,
+                            securities,
+                            generator,
+                            kill_event):
+
+        # import pyarrow.parquet as pq
+
+        # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
+
+        from libs.rabfile import RabbitConnection
+
+        rab_con = RabbitConnection()
+
+        rab_con.channel.exchange_declare(
+            exchange='exchange_data_handler',
+            exchange_type='topic',
+            passive=False,
+            auto_delete=False
+        )
+
+        print('data streaming started')
+
+        for beat in generator:
+            for security in securities:
+
+                temp_connection = pl.read_parquet(
+                    self.db_connection[security]
                 )
 
-                # rabcon.produce(
-                #     body=f'''
-                #     {ts}___{tipo_data}
-                #                 ''',
-                #     routing_key=f'data_csv.{tipo_data}'
-                # )
+                temp_connection = pl.concat(
+                    items=[temp_connection, beat[security]],
+                    how='vertical'
+                )
 
-                time.sleep(pulse)
+                temp_connection.write_parquet(
+                    self.db_connection[security]
+                )
 
-                logger.debug(f"sent_data {ts.strftime('%c')}")
+                time_stamp = beat[security]['date'][0]
+                logger.debug(f"data type {security} sent with time stamp: {time_stamp.strftime('%c')}")
+                rab_con.channel.basic_publish(
+                    exchange='exchange_data_handler',
+                    routing_key=f'data_csv.{security}',
+                    body=f"new_data-{security}-{time_stamp.strftime('%Y%m%d%H%M%S')}"
+                )
 
-            return sent_data
+            if kill_event.is_set():
+                print('closing csv connection')
+                break
 
-    # def client_datafeed_receive(self):
-    #
-    # def portfolio_connection(self):
+    def setup_endpoint_csv(self,securities,generator):
 
-# class DataStorer:
-#
-#     def __int__(self):
+        self.kill_keys['csv_endpoint'] = threading.Event()
+        threading.Thread(target=self._setup_endpoint_csv,
+                         args=(securities,
+                               generator,
+                               self.kill_keys['csv_endpoint'],
+                               )
+                         ).start()
+
+
 
 
 

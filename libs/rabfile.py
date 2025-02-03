@@ -9,6 +9,18 @@ rab_params = pika.ConnectionParameters(
 
 logger = logging.getLogger('autotrade.' + __name__)
 
+class RabbitConnection:
+
+    def __init__(self,
+                 params=rab_params,
+                 ):
+
+        self.connection = pika.BlockingConnection(params)
+        self.channel = self.connection.channel()
+
+        logger.info('RabbitMQ connection and channel initialized')
+
+
 
 class RabbitConCSV:
 
@@ -27,16 +39,16 @@ class RabbitConCSV:
             passive=False,
             auto_delete=True
         )
-        logger.info('RabbitMQ connection initialized')
+        logger.info('RabbitMQ connection and channel initialized v0')
 
     def produce(self,
                 body: str,
-                exchange_name='exchange_data_handler',
+                exchange='exchange_data_handler',
                 routing_key='data_csv'
                 ):
 
         self.channel.basic_publish(
-            exchange=exchange_name,
+            exchange=exchange,
             routing_key=routing_key,
             body=body
         )

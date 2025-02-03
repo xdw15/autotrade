@@ -1,6 +1,6 @@
 import sys
 import logging
-from libs.data_handler import DataHandlerCSV
+from libs.data_handler import DataAPICSV
 from libs.config import work_path
 
 logger = logging.getLogger('autotrade')
@@ -39,8 +39,7 @@ csvinfo = {
     ]
 }
 
-
-aaa = DataHandlerCSV(csvinfo)
+aaa = DataAPICSV(csvinfo)
 logger.debug('DataHandler successfully created')
 aaa.client_datafeed(0)
 logger.debug('All csv data has been streamed')
