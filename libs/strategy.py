@@ -4,7 +4,9 @@ from libs.config import work_path
 import polars as pl
 from libs.rabfile import *
 import threading
+import logging
 
+logger = logging.getLogger('autotrade.' + __name__)
 
 class Strategy(ABC):
     """
@@ -60,6 +62,9 @@ class DumbStrat:
             )
         ).start()
 
+        logger.debug('consumer started')
+
+
 
     def _endpoint_data_handler(self,
                                exchange: str,
@@ -91,11 +96,11 @@ class DumbStrat:
             rab_con.connection.add_callback_threadsafe(
                 rab_con.connection.close
             )
-
-            print(f'the connection was closed: {rab_con.connection.is_closed=}')
+            logger.debug('connection to close called')
 
         self.kill_switch['data_handler'] = consumer_killer
         rab_con.channel.start_consuming()
+        logger.debug(f'{rab_con.connection.is_closed=}')
 
     def rabbitmq_callback(self,channel, method, properties, body):
 
@@ -116,9 +121,9 @@ class DumbStrat:
         )
 
         if current_price > self.day_ma:
-            print(f"with timestamp {time_stamp.strftime('%c')} sell {self.ticker} @ {current_price}")
+            logger.info(f"with timestamp {time_stamp.strftime('%c')} sell {self.ticker} @ {current_price}")
         elif current_price < self.day_ma:
-            print(f"with timestamp {time_stamp.strftime('%c')} buy {self.ticker} @ {current_price}")
+            logger.info(f"with timestamp {time_stamp.strftime('%c')} buy {self.ticker} @ {current_price}")
 
 
 

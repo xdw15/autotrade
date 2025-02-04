@@ -11,7 +11,7 @@ log_FileHandler = logging.FileHandler(
     encoding='UTF-8'
 )
 log_Formatter = logging.Formatter(
-    fmt='---{name:<30}--{filename:<30}--{levelname:<10}--{message:<40}--{asctime:12}',
+    fmt='{levelname:<10}---{name:<30}--{filename:<30}--{message:<40}--{asctime:12}',
     datefmt='%m/%d-%H:%M:%S',
     style='{',
     validate=True
