@@ -1,5 +1,8 @@
-from abc import ABC,abstractmethod
+from abc import ABC, abstractmethod
 import datetime as dt
+
+import pika
+
 from libs.config import work_path
 import polars as pl
 from libs.rabfile import *
@@ -7,6 +10,7 @@ import threading
 import logging
 
 logger = logging.getLogger('autotrade.' + __name__)
+
 
 class Strategy(ABC):
     """
@@ -21,6 +25,7 @@ class Strategy(ABC):
         :return:
         """
         pass
+
     @abstractmethod
     def endpoint_datahandler(self):
         """
@@ -29,10 +34,11 @@ class Strategy(ABC):
         """
         pass
 
+
 class DumbStrat:
     def __init__(self,
-                 calibration_date = dt.date,
-                 ticker = str,
+                 calibration_date=dt.date,
+                 ticker=str,
                  ):
 
         df = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
@@ -40,7 +46,7 @@ class DumbStrat:
             df
             .filter(
                 (pl.col('date').dt.date() == calibration_date)
-                & ( pl.col('Ticker') == ticker )
+                & (pl.col('Ticker') == ticker)
             )
             ['price']
             .mean()
@@ -55,23 +61,30 @@ class DumbStrat:
                               routing_key: str = 'data_csv.Equity'
                               ):
 
+        connection_event = threading.Event()
         threading.Thread(
             target=self._endpoint_data_handler,
             args=(exchange,
                   routing_key,
-            )
+                  connection_event
+                  )
         ).start()
 
+        with threading.Lock():
+            while not connection_event.is_set():
+                pass
+
         logger.debug('consumer started')
-
-
 
     def _endpoint_data_handler(self,
                                exchange: str,
                                routing_key: str,
+                               connection_event: threading.Event
                                ):
 
         rab_con = RabbitConnection()
+        self.kill_switch['data_handler'] = rab_con.connection
+        connection_event.set()
         self.queue_names['data_handler'] = f"Strat-{self.__class__.__name__}-{threading.get_ident()}"
         rab_con.channel.queue_declare(
             queue=self.queue_names['data_handler'],
@@ -92,20 +105,16 @@ class DumbStrat:
             on_message_callback=self.rabbitmq_callback
         )
 
-        def consumer_killer():
-            rab_con.connection.add_callback_threadsafe(
-                rab_con.connection.close
-            )
-            logger.debug('connection to close called')
+        # def consumer_killer():
+        #     rab_con.connection.add_callback_threadsafe(
+        #         rab_con.connection.close
+        #     )
 
-        self.kill_switch['data_handler'] = consumer_killer
         rab_con.channel.start_consuming()
         logger.debug(f'{rab_con.connection.is_closed=}')
 
-    def rabbitmq_callback(self,channel, method, properties, body):
+    def rabbitmq_callback(self, channel, method, properties, body):
 
-
-        #body = '20250131093220'
         time_stamp = dt.datetime.strptime(
             body.decode('ASCII').split('-')[-1],
             '%Y%m%d%H%M%S')
@@ -116,7 +125,7 @@ class DumbStrat:
             df
             .filter(
                 (pl.col('date') == time_stamp)
-                & (pl.col('Ticker') == self.ticker )
+                & (pl.col('Ticker') == self.ticker)
             )['price'][0]
         )
 
@@ -125,10 +134,4 @@ class DumbStrat:
         elif current_price < self.day_ma:
             logger.info(f"with timestamp {time_stamp.strftime('%c')} buy {self.ticker} @ {current_price}")
 
-
-
-
-
-
-
-
+        channel.basic_ack(method.delivery_tag)

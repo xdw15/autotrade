@@ -50,10 +50,10 @@ db_connections = {
 db_handler_app = DataHandlerPrimer(db_connections)
 
 db_handler_app.setup_endpoint_csv(['Equity'],
-                                  csv_client_connection(10)
+                                  csv_client_connection(7)
                                   )
 
-# db_handler_app.kill_keys['csv_endpoint'].set()
+db_handler_app.kill_keys['csv_endpoint'].set()
 
 # for i in csv_client_connection(0):
 #     print(i)

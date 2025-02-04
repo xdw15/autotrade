@@ -29,4 +29,9 @@ dumb_strat.endpoint_data_handler(
     routing_key='data_csv.Equity'
 )
 
-dumb_strat.kill_switch['data_handler']()
+dumb_strat.kill_switch['data_handler'].close_threadsafe()
+
+from libs.rabfile import *
+
+aea = RabbitConnection()
+aea.channel.queue_declare('xd',arguments={'x-consumer-timeout': 10000})

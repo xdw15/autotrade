@@ -1,5 +1,9 @@
 import pika
 import logging
+
+
+logger = logging.getLogger('autotrade.' + __name__)
+
 rab_params = pika.ConnectionParameters(
     host='localhost',
     port=5672,
@@ -7,7 +11,14 @@ rab_params = pika.ConnectionParameters(
 )
 
 
-logger = logging.getLogger('autotrade.' + __name__)
+class BlockingConnectionA(pika.BlockingConnection):
+
+    def close_threadsafe(self):
+        self.add_callback_threadsafe(
+            self.close
+        )
+        logger.debug('connection was closed threadsafe-ly')
+
 
 class RabbitConnection:
 
@@ -15,11 +26,10 @@ class RabbitConnection:
                  params=rab_params,
                  ):
 
-        self.connection = pika.BlockingConnection(params)
+        self.connection = BlockingConnectionA(params)
         self.channel = self.connection.channel()
 
         logger.info('RabbitMQ connection and channel initialized')
-
 
 
 class RabbitConCSV:
