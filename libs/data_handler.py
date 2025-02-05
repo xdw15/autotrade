@@ -1,12 +1,16 @@
 import logging
 from abc import ABC, abstractmethod
+import json
+import pika
 import polars as pl
 # import pika
 import time
 import threading
+from typing import Iterable, Generator
 
-#from ib_async import Contract
-#from pyarrow import timestamp
+
+# from ib_async import Contract
+# from pyarrow import timestamp
 
 from libs.config import work_path
 
@@ -195,7 +199,7 @@ class DataAPICSV:
 
         data_type_to_consume = data_type_to_consume or self.consumable_data.keys()
 
-        def synthetic_stream(pulse_synt):
+        def synthetic_stream():
 
             for ts in self.time_stamps:
 
@@ -219,8 +223,9 @@ class DataAPICSV:
                 yield sent_data
                 #logger.debug(f"sent_data {ts.strftime('%c')}")
 
-                time.sleep(pulse_synt)
-        return synthetic_stream
+                time.sleep(pulse)
+        return synthetic_stream()
+
 
 class DataHandlerPrimer:
 
@@ -249,10 +254,22 @@ class DataHandlerPrimer:
 
         self.kill_keys = {}
 
+    def endpoint_csv(self,
+                     securities: Iterable,
+                     generator: Generator):
+
+        self.kill_keys['csv_endpoint'] = threading.Event()
+        threading.Thread(target=self._setup_endpoint_csv,
+                         args=(securities,
+                               generator,
+                               self.kill_keys['csv_endpoint'],
+                               )
+                         ).start()
+
     def _setup_endpoint_csv(self,
-                            securities,
-                            generator,
-                            kill_event):
+                            securities: Iterable,
+                            generator: Generator,
+                            kill_event: threading.Event):
 
         # import pyarrow.parquet as pq
 
@@ -286,30 +303,32 @@ class DataHandlerPrimer:
                 temp_connection.write_parquet(
                     self.db_connection[security]
                 )
-
+                import string
                 time_stamp = beat[security]['date'][0]
-                logger.debug(f"data type {security} sent with time stamp: {time_stamp.strftime('%c')}")
+                mensaje = {'time_stamp': time_stamp.strftime('%Y%m%d%H%M%S'),
+                           'security': {'type': security,
+                                        'tickers': beat[security]['Ticker'].to_list()},
+                           'event': 'new_data',
+                           'large_shit': [string.printable]*10000}  # delete this later
+
                 rab_con.channel.basic_publish(
                     exchange='exchange_data_handler',
                     routing_key=f'data_csv.{security}',
-                    body=f"new_data-{security}-{time_stamp.strftime('%Y%m%d%H%M%S')}"
+                    body=json.dumps(mensaje),
+                    properties=pika.BasicProperties(content_type='application/json')
                 )
+                logger.debug(f"data---{security}---sent: {time_stamp.strftime('%c')}")
 
             if kill_event.is_set():
-                print('closing csv connection')
+                print('csv connection closed')
+                logger.info('csv connection closed')
                 break
 
-    def setup_endpoint_csv(self,securities,generator):
-
-        self.kill_keys['csv_endpoint'] = threading.Event()
-        threading.Thread(target=self._setup_endpoint_csv,
-                         args=(securities,
-                               generator,
-                               self.kill_keys['csv_endpoint'],
-                               )
-                         ).start()
+    def actual_handler(self):
 
 
+
+import
 
 
 

@@ -41,7 +41,7 @@ csvinfo = {
 
 csv_client = DataAPICSV(csvinfo)
 
-csv_client_connection = csv_client.client_datafeed()
+csv_client_connection = csv_client.client_datafeed(pulse=7)
 
 
 db_connections = {
@@ -49,11 +49,10 @@ db_connections = {
 }
 db_handler_app = DataHandlerPrimer(db_connections)
 
-db_handler_app.setup_endpoint_csv(['Equity'],
-                                  csv_client_connection(7)
-                                  )
+db_handler_app.endpoint_csv(['Equity'], csv_client_connection )
 
-db_handler_app.kill_keys['csv_endpoint'].set()
+
+# db_handler_app.kill_keys['csv_endpoint'].set()
 
 # for i in csv_client_connection(0):
 #     print(i)

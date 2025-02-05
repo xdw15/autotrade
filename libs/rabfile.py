@@ -20,6 +20,8 @@ class BlockingConnectionA(pika.BlockingConnection):
         logger.debug('connection was closed threadsafe-ly')
 
 
+
+
 class RabbitConnection:
 
     def __init__(self,
@@ -30,6 +32,8 @@ class RabbitConnection:
         self.channel = self.connection.channel()
 
         logger.info('RabbitMQ connection and channel initialized')
+
+
 
 
 class RabbitConCSV:

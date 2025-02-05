@@ -1,8 +1,9 @@
+import time
 from abc import ABC, abstractmethod
 import datetime as dt
 
 import pika
-
+import json
 from libs.config import work_path
 import polars as pl
 from libs.rabfile import *
@@ -115,23 +116,46 @@ class DumbStrat:
 
     def rabbitmq_callback(self, channel, method, properties, body):
 
-        time_stamp = dt.datetime.strptime(
-            body.decode('ASCII').split('-')[-1],
-            '%Y%m%d%H%M%S')
+        if properties.content_type == 'application/json':
+            body = json.loads(body)
 
-        df = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
+            # ####remove later
+            from time import perf_counter
+            t0 = perf_counter()
+            dd1 = [cadena_de_1 + 'dd' if isinstance(cadena, str)
+                   else 'jaja'
+                   if len(cadena_de_1) == 1
+                   else 'jajanested'
+                   for cadena in body['large_shit']
+                   for cadena_de_1 in cadena.split()[0]]
+            dd = pl.DataFrame(body['large_shit'])
+            logger.info(f'processed {len(dd1)} strings, took {perf_counter()-t0:,.4f}')
+            del dd, t0, dd1
+            # #####
 
-        current_price = (
-            df
-            .filter(
-                (pl.col('date') == time_stamp)
-                & (pl.col('Ticker') == self.ticker)
-            )['price'][0]
-        )
+            if (body['security']['type'] == 'Equity') \
+                    and (self.ticker in body['security']['tickers']):
 
-        if current_price > self.day_ma:
-            logger.info(f"with timestamp {time_stamp.strftime('%c')} sell {self.ticker} @ {current_price}")
-        elif current_price < self.day_ma:
-            logger.info(f"with timestamp {time_stamp.strftime('%c')} buy {self.ticker} @ {current_price}")
+                time_stamp = dt.datetime.strptime(body['time_stamp'], '%Y%m%d%H%M%S')
 
-        channel.basic_ack(method.delivery_tag)
+                df = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
+
+                current_price = (
+                    df
+                    .filter(
+                        (pl.col('date') == time_stamp)
+                        & (pl.col('Ticker') == self.ticker)
+                    )['price'][0]
+                )
+
+                if current_price > self.day_ma:
+                    logger.info(f"with timestamp {time_stamp.strftime('%c')} sell {self.ticker} @ {current_price}")
+                elif current_price < self.day_ma:
+                    logger.info(f"with timestamp {time_stamp.strftime('%c')} buy {self.ticker} @ {current_price}")
+
+            channel.basic_ack(method.delivery_tag)
+
+        else:
+            channel.basic_nack(method.delivery_tag)
+            print(f'content_type is not application/json, message not consumed')
+            logger.warning(f'content_type is not application/json, message not consumed')

@@ -1,6 +1,8 @@
 import numpy as np
 import polars as pl
 from abc import ABC, abstractmethod
+import pika
+import datetime as dt
 
 
 class AutoPort(ABC):
@@ -78,10 +80,6 @@ class AutoPort(ABC):
         pass
 
 
-import pika
-import datetime as dt
-
-
 class ToyPortfolio:
     """
     a portfolio implementation that can deal with equities at first
@@ -90,9 +88,11 @@ class ToyPortfolio:
     def __init__(
             self,
             initial_holdings: dict,
-            time_stamp: dt.datetime,
+            time_stamp: str,
             price_ccy: str = None,
     ):
+
+        time_stamp = dt.datetime.strptime(time_stamp, '%Y%m%d%H%M%S')
 
         self.positions = self._init_composition(
             initial_holdings,
@@ -101,10 +101,10 @@ class ToyPortfolio:
 
         self.price_ccy = price_ccy or 'USD'
 
-    def _init_composition(self,
-                          p0: dict,
+    @staticmethod
+    def _init_composition(p0: dict,
                           time_stamp: dt.datetime
-    ) -> dict:
+                          ) -> dict:
         """
         :param p0: a dict with each key containing
         a type of security with positions vector
@@ -134,9 +134,9 @@ class ToyPortfolio:
         for security in supported_securities.keys():
             present_fields = [
                 True
-                if (i,j) in supported_securities[security].items()
+                if (sec, fields) in supported_securities[security].items()
                 else False
-                for i,j in zip(p0[security].columns, p0[security].dtypes)
+                for sec, fields in zip(p0[security].columns, p0[security].dtypes)
             ]
 
             if not all(present_fields):
@@ -160,7 +160,7 @@ class ToyPortfolio:
             positions[security] = (
                 p0[security]
                 .with_columns(
-                    pl.lit(time_stamp).alias('date').dt.round("1s")
+                    pl.lit(time_stamp).alias('date')
                 )
                 .select(['date'] + p0[security].columns)
             )
@@ -168,7 +168,8 @@ class ToyPortfolio:
         return positions
 
 
-    def client_datahandler(self):
+    def endpoint_datahandler(self):
+
 
 
 
