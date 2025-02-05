@@ -7,7 +7,8 @@ logger = logging.getLogger('autotrade.' + __name__)
 rab_params = pika.ConnectionParameters(
     host='localhost',
     port=5672,
-    credentials=pika.PlainCredentials('guest', 'guest')
+    credentials=pika.PlainCredentials('guest', 'guest'),
+    heartbeat=5
 )
 
 
@@ -18,8 +19,6 @@ class BlockingConnectionA(pika.BlockingConnection):
             self.close
         )
         logger.debug('connection was closed threadsafe-ly')
-
-
 
 
 class RabbitConnection:

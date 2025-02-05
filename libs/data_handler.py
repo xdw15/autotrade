@@ -7,6 +7,9 @@ import polars as pl
 import time
 import threading
 from typing import Iterable, Generator
+import queue
+from libs.rabfile import *
+
 
 
 # from ib_async import Contract
@@ -90,14 +93,14 @@ class DataAPICSV:
 
     def __init__(
             self,
-            csv_info: dict,
+            csv_info: dict):
             # pulse: int
-    ):
+
 
         # checking input dictionary is compliant
         field_checker = {
-            'Equity': ['Ticker', 'path', 'col_names']
-        }
+            'Equity': ['Ticker', 'path', 'col_names']}
+
         for tipo_data in csv_info.keys():
 
             checker = [
@@ -105,9 +108,8 @@ class DataAPICSV:
                 all([
                     True if campo in field_checker[tipo_data]
                     else False
-                    for campo in csv_file
+                    for campo in csv_file])
 
-                ])
                 for csv_file in csv_info[tipo_data]
 
             ]
@@ -221,7 +223,7 @@ class DataAPICSV:
                     # )
 
                 yield sent_data
-                #logger.debug(f"sent_data {ts.strftime('%c')}")
+                # logger.debug(f"sent_data {ts.strftime('%c')}")
 
                 time.sleep(pulse)
         return synthetic_stream()
@@ -230,11 +232,13 @@ class DataAPICSV:
 class DataHandlerPrimer:
 
     def __init__(self,
-                 data_base_connections : dict,
+                 data_base_connections: dict,
                  ):
 
+        # <editor-fold desc="initializing the connection to the database">
         # assume the connection is just a path where to store the parquets
         # it will check if the path exists
+
         from os import path as os_path
 
         self.db_connection = {}
@@ -251,18 +255,30 @@ class DataHandlerPrimer:
             else:
                 logger.error(f"Security: '{security}' not supported")
                 raise Exception(f"Security: '{security}' not supported")
+        # </editor-fold>
 
-        self.kill_keys = {}
+        # <editor-fold desc="ways to shut down stuff">
+        self.endpoint_shutdown = {}
+
+        self.db_handler_shutdown = threading.Event()
+        # </editor-fold>
+
+
+        # <editor-fold desc="assigning other attributes">
+        self.queue_db_handler = queue.Queue()
+        self.rab_connection = RabbitConnection()
+
+        # </editor-fold>
 
     def endpoint_csv(self,
                      securities: Iterable,
                      generator: Generator):
 
-        self.kill_keys['csv_endpoint'] = threading.Event()
+        self.endpoint_shutdown['csv_api'] = threading.Event()
         threading.Thread(target=self._setup_endpoint_csv,
                          args=(securities,
                                generator,
-                               self.kill_keys['csv_endpoint'],
+                               self.endpoint_shutdown['csv_api'],
                                )
                          ).start()
 
@@ -274,8 +290,6 @@ class DataHandlerPrimer:
         # import pyarrow.parquet as pq
 
         # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
-
-        from libs.rabfile import RabbitConnection
 
         rab_con = RabbitConnection()
 
@@ -303,6 +317,7 @@ class DataHandlerPrimer:
                 temp_connection.write_parquet(
                     self.db_connection[security]
                 )
+
                 import string
                 time_stamp = beat[security]['date'][0]
                 mensaje = {'time_stamp': time_stamp.strftime('%Y%m%d%H%M%S'),
@@ -322,13 +337,88 @@ class DataHandlerPrimer:
             if kill_event.is_set():
                 print('csv connection closed')
                 logger.info('csv connection closed')
-                break
+                return
 
-    def actual_handler(self):
+    def _setup_endpoint_csv2(self,
+                             securities: Iterable,
+                             generator: Generator,
+                             kill_event: threading.Event):
+        # import pyarrow.parquet as pq
+
+        # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
+
+        logger.debug('started streaming from csv endpoint')
+
+        for beat in generator:
+            for security in securities:
+
+                self.queue_db_handler.put(
+                    {'data': beat[security],
+                     'info': security}
+                )
+                time_stamp = beat[security]['date'][0]
+                logger.debug(f"data streamed from csv_api {time_stamp}")
+
+            if kill_event.is_set():
+                print('csv connection closed')
+                logger.info('csv connection closed')
+                return
+
+    def _handler_process(self):
+
+        from libs.rabfile import RabbitConnection
+
+        rab_con = RabbitConnection()
+        self.rab_connections['handler'] = rab_con
+
+        rab_con.channel.exchange_declare(
+            exchange='exchange_data_handler',
+            exchange_type='topic',
+            passive=False,
+            auto_delete=False
+        )
 
 
+        logger.debug('DataHandler process started')
 
-import
+        while not self.db_handler_shutdown.is_set():
+
+            queue_item = self.queue_db_handler.get()
+
+            security = queue_item['info']
+            data = queue_item['data']
+
+            temp_connection = pl.read_parquet(
+                self.db_connection[security]
+            )
+
+            temp_connection = pl.concat(
+                items=[temp_connection, data],
+                how='vertical'
+            )
+
+            temp_connection.write_parquet(
+                self.db_connection[security]
+            )
+
+            import string
+            time_stamp = data['date'][0]
+            mensaje = {'time_stamp': time_stamp.strftime('%Y%m%d%H%M%S'),
+                       'security': {'type': security,
+                                    'tickers': data['Ticker'].to_list()},
+                       'event': 'new_data',
+                       'large_shit': [string.printable]*10000}  # delete this later
+
+            rab_con.channel.basic_publish(
+                exchange='exchange_data_handler',
+                routing_key=f'data_csv.{security}',
+                body=json.dumps(mensaje),
+                properties=pika.BasicProperties(content_type='application/json')
+            )
+            logger.debug(f"data---{security}---sent: {time_stamp.strftime('%c')}")
+            self.queue_db_handler.task_done()
+
+
 
 
 
