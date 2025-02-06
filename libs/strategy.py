@@ -55,16 +55,16 @@ class DumbStrat:
 
         self.queue_names = {}
         self.ticker = ticker
-        self.kill_switch = {}
+        self.rab_connections = {}
 
-    def endpoint_data_handler(self,
+    def connect_db_endpoint(self,
                               exchange: str,
                               routing_key: str = 'data_csv.Equity'
                               ):
 
         connection_event = threading.Event()
         threading.Thread(
-            target=self._endpoint_data_handler,
+            target=self._setup_db_endpoint,
             args=(exchange,
                   routing_key,
                   connection_event
@@ -77,14 +77,22 @@ class DumbStrat:
 
         logger.debug('consumer started')
 
-    def _endpoint_data_handler(self,
+    def close_db_endpoint(self):
+            if self.rab_connections['data_handler'].is_open:
+                self.rab_connections['data_handler'].add_callback_threadsafe(
+                    self.rab_connections['data_handler'].close
+                )
+            else:
+                logger.debug('db_endpoint connection already closed')
+
+    def _setup_db_endpoint(self,
                                exchange: str,
                                routing_key: str,
                                connection_event: threading.Event
                                ):
 
         rab_con = RabbitConnection()
-        self.kill_switch['data_handler'] = rab_con.connection
+        self.rab_connections['data_handler'] = rab_con.connection
         connection_event.set()
         self.queue_names['data_handler'] = f"Strat-{self.__class__.__name__}-{threading.get_ident()}"
         rab_con.channel.queue_declare(

@@ -1,4 +1,3 @@
-import logging
 from abc import ABC, abstractmethod
 import json
 import pika
@@ -258,91 +257,38 @@ class DataHandlerPrimer:
         # </editor-fold>
 
         # <editor-fold desc="ways to shut down stuff">
-        self.endpoint_shutdown = {}
+        self.shutdown_event = {}
 
-        self.db_handler_shutdown = threading.Event()
         # </editor-fold>
 
 
         # <editor-fold desc="assigning other attributes">
         self.queue_db_handler = queue.Queue()
-        self.rab_connection = RabbitConnection()
+        self.rab_connections = {}
 
         # </editor-fold>
 
-    def endpoint_csv(self,
+    def connect_csv_endpoint(self,
                      securities: Iterable,
                      generator: Generator):
 
-        self.endpoint_shutdown['csv_api'] = threading.Event()
-        threading.Thread(target=self._setup_endpoint_csv,
+        self.shutdown_event['csv_endpoint'] = threading.Event()
+        threading.Thread(target=self._setup_connect_csv_endpoint,
                          args=(securities,
                                generator,
-                               self.endpoint_shutdown['csv_api'],
                                )
                          ).start()
 
-    def _setup_endpoint_csv(self,
-                            securities: Iterable,
-                            generator: Generator,
-                            kill_event: threading.Event):
+    def close_csv_endpoint(self):
+        if self.shutdown_event['csv_endpoint'].is_set():
+            logger.info('csv_endpoint was closed already')
+        else:
+            self.shutdown_event['csv_endpoint'].set()
 
-        # import pyarrow.parquet as pq
 
-        # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
-
-        rab_con = RabbitConnection()
-
-        rab_con.channel.exchange_declare(
-            exchange='exchange_data_handler',
-            exchange_type='topic',
-            passive=False,
-            auto_delete=False
-        )
-
-        print('data streaming started')
-
-        for beat in generator:
-            for security in securities:
-
-                temp_connection = pl.read_parquet(
-                    self.db_connection[security]
-                )
-
-                temp_connection = pl.concat(
-                    items=[temp_connection, beat[security]],
-                    how='vertical'
-                )
-
-                temp_connection.write_parquet(
-                    self.db_connection[security]
-                )
-
-                import string
-                time_stamp = beat[security]['date'][0]
-                mensaje = {'time_stamp': time_stamp.strftime('%Y%m%d%H%M%S'),
-                           'security': {'type': security,
-                                        'tickers': beat[security]['Ticker'].to_list()},
-                           'event': 'new_data',
-                           'large_shit': [string.printable]*10000}  # delete this later
-
-                rab_con.channel.basic_publish(
-                    exchange='exchange_data_handler',
-                    routing_key=f'data_csv.{security}',
-                    body=json.dumps(mensaje),
-                    properties=pika.BasicProperties(content_type='application/json')
-                )
-                logger.debug(f"data---{security}---sent: {time_stamp.strftime('%c')}")
-
-            if kill_event.is_set():
-                print('csv connection closed')
-                logger.info('csv connection closed')
-                return
-
-    def _setup_endpoint_csv2(self,
+    def _setup_connect_csv_endpoint(self,
                              securities: Iterable,
-                             generator: Generator,
-                             kill_event: threading.Event):
+                             generator: Generator):
         # import pyarrow.parquet as pq
 
         # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
@@ -359,18 +305,32 @@ class DataHandlerPrimer:
                 time_stamp = beat[security]['date'][0]
                 logger.debug(f"data streamed from csv_api {time_stamp}")
 
-            if kill_event.is_set():
+            if self.shutdown_event['csv_endpoint'].is_set():
                 print('csv connection closed')
                 logger.info('csv connection closed')
                 return
 
-    def _handler_process(self):
+    def start_db_maintainer(self):
+        self.shutdown_event['db_maintainer'] = threading.Event()
+
+        threading.Thread(
+            target=self._setup_db_maintainer,
+            args=()
+        ).start()
+
+    def stop_db_maintainer(self):
+        if self.shutdown_event['db_maintainer'].is_set():
+            logger.info('db maintainer was stopped already')
+        else:
+            self.shutdown_event['db_maintainer'].set()
+
+
+    def _setup_db_maintainer(self):
 
         from libs.rabfile import RabbitConnection
 
         rab_con = RabbitConnection()
         self.rab_connections['handler'] = rab_con
-
         rab_con.channel.exchange_declare(
             exchange='exchange_data_handler',
             exchange_type='topic',
@@ -378,12 +338,14 @@ class DataHandlerPrimer:
             auto_delete=False
         )
 
-
         logger.debug('DataHandler process started')
 
-        while not self.db_handler_shutdown.is_set():
+        while not self.shutdown_event['db_maintainer'].is_set():
 
-            queue_item = self.queue_db_handler.get()
+            try:
+                queue_item = self.queue_db_handler.get(block=True,timeout=60)
+            except queue.Empty:
+                continue
 
             security = queue_item['info']
             data = queue_item['data']
@@ -418,6 +380,8 @@ class DataHandlerPrimer:
             logger.debug(f"data---{security}---sent: {time_stamp.strftime('%c')}")
             self.queue_db_handler.task_done()
 
+        rab_con.connection.close()
+        logger.debug('Data maintainer was shutdown')
 
 
 

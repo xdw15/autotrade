@@ -26,12 +26,13 @@ dumb_strat = DumbStrat(
 )
 
 logger.debug(f'this is{__name__}')
-dumb_strat.endpoint_data_handler(
+dumb_strat.connect_db_endpoint(
     exchange='exchange_data_handler',
     routing_key='data_csv.Equity'
 )
 
-# dumb_strat.kill_switch['data_handler'].close_threadsafe()
+dumb_strat.close_db_endpoint()
+# dumb_strat.rab_connections['data_handler'].close_threadsafe()
 
 
 # from libs.rabfile import *

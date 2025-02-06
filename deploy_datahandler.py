@@ -48,12 +48,15 @@ db_connections = {
     'Equity': work_path + '/synthetic_server_path/us_equity.parquet'
 }
 db_handler_app = DataHandlerPrimer(db_connections)
+db_handler_app.start_db_maintainer()
 
-db_handler_app.endpoint_csv(['Equity'], csv_client_connection )
+db_handler_app.connect_csv_endpoint(['Equity'], csv_client_connection)
 
+# db_handler_app.rab_connections['handler'].connection.is_open
 
-# db_handler_app.endpoint_shutdown['csv_api'].set()
+# db_handler_app.shutdown_event['csv_endpoint'].set()
 
+# db_handler_app.queue_db_handler.shu
 # for i in csv_client_connection(0):
 #     print(i)
 #     i['Equity']['date'][0].strftime('%Y%m%d%H%M%S')
