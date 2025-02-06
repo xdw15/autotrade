@@ -9,8 +9,6 @@ from typing import Iterable, Generator
 import queue
 from libs.rabfile import *
 
-
-
 # from ib_async import Contract
 # from pyarrow import timestamp
 
@@ -93,12 +91,10 @@ class DataAPICSV:
     def __init__(
             self,
             csv_info: dict):
-            # pulse: int
-
+        # pulse: int
 
         # checking input dictionary is compliant
-        field_checker = {
-            'Equity': ['Ticker', 'path', 'col_names']}
+        field_checker = {'equity': ['ticker', 'path', 'col_names']}
 
         for tipo_data in csv_info.keys():
 
@@ -115,13 +111,13 @@ class DataAPICSV:
 
             if not all(checker):
                 faulty_csv = [
-                    dic['Ticker']
+                    dic['ticker']
                     for dic, ok in zip(csv_info[tipo_data], checker)
                     if not ok
                 ]
                 raise Exception(f'''
                     Missing fields in data type {tipo_data}\n
-                    security: { faulty_csv }
+                    security: {faulty_csv}
                     ''')
 
         self._csv_info = csv_info
@@ -133,7 +129,6 @@ class DataAPICSV:
         self.consumable_data = {}
         self.time_stamps = []
         for tipo_data, csv_files in self._csv_info.items():
-
             self.consumable_data[tipo_data] = (
                 pl.concat(
                     items=[
@@ -148,7 +143,7 @@ class DataAPICSV:
                             )
                             .select(file_dict['col_names'].keys())
                             .with_columns(
-                                pl.lit(file_dict['Ticker']).alias('Ticker')
+                                pl.lit(file_dict['ticker']).alias('ticker')
                             )
                         )
                         for file_dict in csv_files
@@ -206,7 +201,6 @@ class DataAPICSV:
 
                 sent_data = {}
                 for tipo_data in data_type_to_consume:
-
                     sent_data[tipo_data] = (
                         self.consumable_data[tipo_data]
                         .filter(
@@ -225,6 +219,7 @@ class DataAPICSV:
                 # logger.debug(f"sent_data {ts.strftime('%c')}")
 
                 time.sleep(pulse)
+
         return synthetic_stream()
 
 
@@ -241,7 +236,7 @@ class DataHandlerPrimer:
         from os import path as os_path
 
         self.db_connection = {}
-        securities_supported = ['Equity']
+        securities_supported = ['equity']
 
         for security, connection in data_base_connections.items():
 
@@ -261,7 +256,6 @@ class DataHandlerPrimer:
 
         # </editor-fold>
 
-
         # <editor-fold desc="assigning other attributes">
         self.queue_db_handler = queue.Queue()
         self.rab_connections = {}
@@ -269,8 +263,8 @@ class DataHandlerPrimer:
         # </editor-fold>
 
     def connect_csv_endpoint(self,
-                     securities: Iterable,
-                     generator: Generator):
+                             securities: Iterable,
+                             generator: Generator):
 
         self.shutdown_event['csv_endpoint'] = threading.Event()
         threading.Thread(target=self._setup_connect_csv_endpoint,
@@ -285,10 +279,9 @@ class DataHandlerPrimer:
         else:
             self.shutdown_event['csv_endpoint'].set()
 
-
     def _setup_connect_csv_endpoint(self,
-                             securities: Iterable,
-                             generator: Generator):
+                                    securities: Iterable,
+                                    generator: Generator):
         # import pyarrow.parquet as pq
 
         # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
@@ -297,7 +290,6 @@ class DataHandlerPrimer:
 
         for beat in generator:
             for security in securities:
-
                 self.queue_db_handler.put(
                     {'data': beat[security],
                      'info': security}
@@ -324,7 +316,6 @@ class DataHandlerPrimer:
         else:
             self.shutdown_event['db_maintainer'].set()
 
-
     def _setup_db_maintainer(self):
 
         from libs.rabfile import RabbitConnection
@@ -343,7 +334,7 @@ class DataHandlerPrimer:
         while not self.shutdown_event['db_maintainer'].is_set():
 
             try:
-                queue_item = self.queue_db_handler.get(block=True,timeout=60)
+                queue_item = self.queue_db_handler.get(block=True, timeout=60)
             except queue.Empty:
                 continue
 
@@ -367,9 +358,9 @@ class DataHandlerPrimer:
             time_stamp = data['date'][0]
             mensaje = {'time_stamp': time_stamp.strftime('%Y%m%d%H%M%S'),
                        'security': {'type': security,
-                                    'tickers': data['Ticker'].to_list()},
+                                    'tickers': data['ticker'].to_list()},
                        'event': 'new_data',
-                       'large_shit': [string.printable]*10000}  # delete this later
+                       'large_shit': [string.printable] * 10000}  # delete this later
 
             rab_con.channel.basic_publish(
                 exchange='exchange_data_handler',
@@ -382,9 +373,3 @@ class DataHandlerPrimer:
 
         rab_con.connection.close()
         logger.debug('Data maintainer was shutdown')
-
-
-
-
-
-

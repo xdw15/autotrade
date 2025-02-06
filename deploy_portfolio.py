@@ -8,16 +8,16 @@ import datetime as dt
 fecha_now = dt.datetime.now().strftime('%Y%m%d%H%M%S')
 
 pos_0 = {
-    'Cash': pl.DataFrame(data=[[1e5, 'USD']],
-                         schema=['Amount', 'Ccy'],
+    'cash': pl.DataFrame(data=[[1e5, 1e5, 'USD']],
+                         schema=['amount', 'cost_basis', 'ccy'],
                          orient='row'),
-    'Equity': pl.DataFrame(data=[[10.0, 'USD', 'AAPL'],
-                                 [30.0, 'USD', 'QQQ']],
-                           schema=['Amount', 'Ccy', 'Ticker'],
+    'equity': pl.DataFrame(data=[[10.0, 10*235.2, 'USD', 'AAPL'],
+                                 [30.0, 30*521.7, 'USD', 'QQQ']],
+                           schema=['amount', 'cost_basis', 'ccy', 'ticker'],
                            orient='row')
 }
 
-tp = ToyPortfolio(pos_0,fecha_now)
+tp = ToyPortfolio(pos_0, fecha_now)
 
 
-tp.positions['Equity']
+tp.positions['equity']

@@ -47,7 +47,7 @@ class DumbStrat:
             df
             .filter(
                 (pl.col('date').dt.date() == calibration_date)
-                & (pl.col('Ticker') == ticker)
+                & (pl.col('ticker') == ticker)
             )
             ['price']
             .mean()
@@ -58,9 +58,8 @@ class DumbStrat:
         self.rab_connections = {}
 
     def connect_db_endpoint(self,
-                              exchange: str,
-                              routing_key: str = 'data_csv.Equity'
-                              ):
+                            exchange: str,
+                            routing_key: str = 'data_csv.Equity'):
 
         connection_event = threading.Event()
         threading.Thread(
@@ -78,18 +77,19 @@ class DumbStrat:
         logger.debug('consumer started')
 
     def close_db_endpoint(self):
-            if self.rab_connections['data_handler'].is_open:
-                self.rab_connections['data_handler'].add_callback_threadsafe(
-                    self.rab_connections['data_handler'].close
-                )
-            else:
-                logger.debug('db_endpoint connection already closed')
+
+        if self.rab_connections['data_handler'].is_open:
+            self.rab_connections['data_handler'].add_callback_threadsafe(
+                self.rab_connections['data_handler'].close
+            )
+        else:
+            logger.debug('db_endpoint connection already closed')
 
     def _setup_db_endpoint(self,
-                               exchange: str,
-                               routing_key: str,
-                               connection_event: threading.Event
-                               ):
+                           exchange: str,
+                           routing_key: str,
+                           connection_event: threading.Event
+                           ):
 
         rab_con = RabbitConnection()
         self.rab_connections['data_handler'] = rab_con.connection
@@ -111,7 +111,7 @@ class DumbStrat:
 
         rab_con.channel.basic_consume(
             queue=self.queue_names['data_handler'],
-            on_message_callback=self.rabbitmq_callback
+            on_message_callback=self.db_endpoint_callback
         )
 
         # def consumer_killer():
@@ -122,7 +122,7 @@ class DumbStrat:
         rab_con.channel.start_consuming()
         logger.debug(f'{rab_con.connection.is_closed=}')
 
-    def rabbitmq_callback(self, channel, method, properties, body):
+    def db_endpoint_callback(self, channel, method, properties, body):
 
         if properties.content_type == 'application/json':
             body = json.loads(body)
@@ -141,7 +141,7 @@ class DumbStrat:
             del dd, t0, dd1
             # #####
 
-            if (body['security']['type'] == 'Equity') \
+            if (body['security']['type'] == 'equity') \
                     and (self.ticker in body['security']['tickers']):
 
                 time_stamp = dt.datetime.strptime(body['time_stamp'], '%Y%m%d%H%M%S')
@@ -152,7 +152,7 @@ class DumbStrat:
                     df
                     .filter(
                         (pl.col('date') == time_stamp)
-                        & (pl.col('Ticker') == self.ticker)
+                        & (pl.col('ticker') == self.ticker)
                     )['price'][0]
                 )
 

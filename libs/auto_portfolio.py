@@ -113,14 +113,16 @@ class ToyPortfolio:
 
         # supported securities and required fields per security
         supported_securities = {
-            'Equity': {
-                'Ccy': pl.String,
-                'Amount': pl.Float64,
-                'Ticker': pl.String,
+            'equity': {
+                'ccy': pl.String,
+                'amount': pl.Float64,
+                'cost_basis': pl.Float64,
+                'ticker': pl.String,
             },
-            'Cash': {
-                'Ccy': pl.String,
-                'Amount': pl.Float64,
+            'cash': {
+                'ccy': pl.String,
+                'amount': pl.Float64,
+                'cost_basis': pl.Float64,
             }
         }
 
@@ -168,7 +170,7 @@ class ToyPortfolio:
         return positions
 
 
-    def endpoint_datahandler(self):
+
 
 
 

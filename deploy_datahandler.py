@@ -25,14 +25,14 @@ logger.addHandler(log_stream_handler)
 
 csvinfo = {
 
-    'Equity': [
+    'equity': [
         {
-            'Ticker': 'QQQ',
+            'ticker': 'QQQ',
             'path': work_path + "/archivosvarios/QQQ2.csv",
             'col_names': {'date': 'date', 'price': 'average'}
         },
         {
-            'Ticker': 'AAPL',
+            'ticker': 'AAPL',
             'path': work_path + "/archivosvarios/AAPL2.csv",
             'col_names': {'date': 'date', 'price': 'average'}
         },
@@ -45,12 +45,15 @@ csv_client_connection = csv_client.client_datafeed(pulse=7)
 
 
 db_connections = {
-    'Equity': work_path + '/synthetic_server_path/us_equity.parquet'
+    'equity': work_path + '/synthetic_server_path/us_equity.parquet'
 }
 db_handler_app = DataHandlerPrimer(db_connections)
 db_handler_app.start_db_maintainer()
 
-db_handler_app.connect_csv_endpoint(['Equity'], csv_client_connection)
+db_handler_app.connect_csv_endpoint(['equity'], csv_client_connection)
+
+
+#db_handler_app.close_csv_endpoint()
 
 # db_handler_app.rab_connections['handler'].connection.is_open
 
