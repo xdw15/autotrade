@@ -52,8 +52,10 @@ db_handler_app.start_db_maintainer()
 
 db_handler_app.connect_csv_endpoint(['equity'], csv_client_connection)
 
+db_handler_app.start_db_rpc_api()
 
-#db_handler_app.close_csv_endpoint()
+db_handler_app.close_db_rpc_api()
+
 
 # db_handler_app.rab_connections['handler'].connection.is_open
 

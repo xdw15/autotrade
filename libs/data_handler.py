@@ -8,13 +8,7 @@ import threading
 from typing import Iterable, Generator
 import queue
 from libs.rabfile import *
-
-# from ib_async import Contract
-# from pyarrow import timestamp
-
-from libs.config import work_path
-
-logger = logging.getLogger('autotrade.' + __name__)
+from libs.config import *
 
 
 class DataHandlerApp(ABC):
@@ -88,9 +82,8 @@ class DataAPICSV:
     replicates a live daily trading session
     """
 
-    def __init__(
-            self,
-            csv_info: dict):
+    def __init__(self,
+                 csv_info: dict):
         # pulse: int
 
         # checking input dictionary is compliant
@@ -236,11 +229,11 @@ class DataHandlerPrimer:
         from os import path as os_path
 
         self.db_connection = {}
-        securities_supported = ['equity']
+        supported_securities = ['equity']
 
         for security, connection in data_base_connections.items():
 
-            if security in securities_supported:
+            if security in supported_securities:
                 if os_path.exists(connection):
                     self.db_connection[security] = connection
                 else:
@@ -259,7 +252,9 @@ class DataHandlerPrimer:
         # <editor-fold desc="assigning other attributes">
         self.queue_db_handler = queue.Queue()
         self.rab_connections = {}
-
+        self.read_permissions = {security: threading.Event()
+                                 for security in supported_securities}
+        self.thread_tracker = {}
         # </editor-fold>
 
     def connect_csv_endpoint(self,
@@ -321,7 +316,7 @@ class DataHandlerPrimer:
         from libs.rabfile import RabbitConnection
 
         rab_con = RabbitConnection()
-        self.rab_connections['handler'] = rab_con
+        # self.rab_connections['handler'] = rab_con
         rab_con.channel.exchange_declare(
             exchange='exchange_data_handler',
             exchange_type='topic',
@@ -350,6 +345,9 @@ class DataHandlerPrimer:
                 how='vertical'
             )
 
+            while self.read_permissions[security].is_set():
+                rab_con.connection.sleep(1)
+
             temp_connection.write_parquet(
                 self.db_connection[security]
             )
@@ -368,8 +366,117 @@ class DataHandlerPrimer:
                 body=json.dumps(mensaje),
                 properties=pika.BasicProperties(content_type='application/json')
             )
+
+            rab_con.channel.basic_publish(
+                exchange='exchange_data_handler',
+                routing_key=f'data_csv.{security}',
+                body=json.dumps(mensaje),
+                properties=pika.BasicProperties(content_type='application/json')
+            )
             logger.debug(f"data---{security}---sent: {time_stamp.strftime('%c')}")
             self.queue_db_handler.task_done()
 
         rab_con.connection.close()
         logger.debug('Data maintainer was shutdown')
+
+
+
+    def start_db_rpc_api(self):
+
+        connection_event = threading.Event()
+        t = threading.Thread(target=self._setup_db_rpc_api,
+                             args=(connection_event,))
+
+        self.thread_tracker['rpc_api'] = t
+        t.start()
+
+        with threading.Lock():
+            while not connection_event.is_set():
+                pass
+
+    def close_db_rpc_api(self):
+        if self.rab_connections['rpc_api'].connection.is_open:
+            (
+                self.rab_connections['rpc_api']
+                .connection.add_callback_threadsafe(
+                    self.rab_connections['rpc_api']
+                    .channel.stop_consuming
+                )
+            )
+
+            (
+                self.rab_connections['rpc_api']
+                .connection.add_callback_threadsafe(
+                    self.rab_connections['rpc_api']
+                    .connection.close
+                )
+            )
+
+            if self.thread_tracker['rpc_api'].is_alive():
+                tag = 'open'
+            else:
+                tag = 'closed'
+            logger.info('rpc_api closed')
+        else:
+            logger.info('rpc_api connection closed already')
+
+
+    def _setup_db_rpc_api(self,
+                          connection_event):
+
+        name_exchange = 'exchange_data_handler_rpc'
+        name_queue = 'rpc_data_handler'
+        rab_con = RabbitConnection()
+        self.rab_connections['rpc_api'] = rab_con
+        connection_event.set()
+        rab_con.channel.exchange_declare(exchange=name_exchange,
+                                         exchange_type='direct',
+                                         passive=False)
+
+        rab_con.channel.queue_declare(queue=name_queue,
+                                      passive=False,
+                                      exclusive=True,
+                                      arguments={'x-consumer-timeout': 180_000}
+                                      )
+
+        rab_con.channel.queue_bind(queue=name_queue,
+                                   exchange=name_exchange,
+                                   routing_key=f"rt_{name_queue}")
+
+
+        def rpc_cllbck(ch,method,properties,body):
+            if properties.content_type != 'application/json':
+                raise Exception(f"Content type not json or specified")
+
+
+            body = json.loads(body)
+            if body['permission'] == 'acquire':
+                self.read_permissions[body['security']].set()
+            elif body['permission'] == 'release':
+                self.read_permissions[body['security']].clear()
+
+            rab_con.channel.basic_publish(
+                exchange=name_exchange,
+                routing_key=body['routing_key'],
+                body=json.dumps({'response': 'granted'}),
+                properties=pika.BasicProperties(
+                    content_type='application/json',
+                )
+            )
+
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+
+        rab_con.channel.basic_qos(prefetch_count=1)
+        rab_con.channel.basic_consume(queue=name_queue,
+                                      on_message_callback=rpc_cllbck)
+
+        rab_con.channel.start_consuming()
+
+
+
+
+
+
+
+
+

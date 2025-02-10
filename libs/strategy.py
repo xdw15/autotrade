@@ -66,8 +66,7 @@ class DumbStrat:
             target=self._setup_db_endpoint,
             args=(exchange,
                   routing_key,
-                  connection_event
-                  )
+                  connection_event)
         ).start()
 
         with threading.Lock():
@@ -79,6 +78,7 @@ class DumbStrat:
     def close_db_endpoint(self):
 
         if self.rab_connections['data_handler'].is_open:
+
             self.rab_connections['data_handler'].add_callback_threadsafe(
                 self.rab_connections['data_handler'].close
             )

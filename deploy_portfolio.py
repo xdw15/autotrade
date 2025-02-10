@@ -19,5 +19,5 @@ pos_0 = {
 
 tp = ToyPortfolio(pos_0, fecha_now)
 
-
 tp.positions['equity']
+
