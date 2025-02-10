@@ -1,11 +1,13 @@
 import threading
-
+import queue
+import typing
 import numpy as np
 import polars as pl
 from abc import ABC, abstractmethod
 import pika
 import datetime as dt
 import json
+from collections import  deque
 
 from charset_normalizer.md import getLogger
 
@@ -15,6 +17,7 @@ import logging
 
 
 logger = getLogger('autotrade.'+ __name__)
+
 
 class AutoPort(ABC):
 
@@ -114,9 +117,14 @@ class ToyPortfolio:
         self.thread_tracker = {}
         self.rab_connections = {}
 
-        # <editor-fold desc="updatables">
+        # <editor-fold desc="instance updatables">
         self.mtm = None
         self.pnl = None
+        # </editor-fold>
+
+        # <editor-fold desc="instance queue container">
+        self.queues = {}
+        self.queues['db_endpoint'] = queue.Queue()
         # </editor-fold>
 
     @staticmethod
@@ -134,41 +142,38 @@ class ToyPortfolio:
                 'ccy': pl.String,
                 'amount': pl.Float64,
                 'cost_basis': pl.Float64,
-                'ticker': pl.String,
-            },
+                'ticker': pl.String, },
             'cash': {
                 'ccy': pl.String,
                 'amount': pl.Float64,
-                'cost_basis': pl.Float64,
-            }
+                'cost_basis': pl.Float64, }
         }
 
         # ensuring the securities provided are supported
-        if not all(
-            [True if i in supported_securities else False for i in p0.keys()]
-        ):
-            raise Exception('Security type is not currently supported')
+        if not all([True if input_security in supported_securities
+                    else False
+                    for input_security in p0.keys()]):
+            raise Exception('Input security type is not currently supported')
 
-        # ensuring the given securities have the necessary fields
+        # ensuring the given securities have the necessary fields and dtypes
         for security in supported_securities.keys():
             present_fields = [
-                True
-                if (sec, fields) in supported_securities[security].items()
+                True if (input_security,
+                         input_fields) in supported_securities[security].items()
                 else False
-                for sec, fields in zip(p0[security].columns, p0[security].dtypes)
+                for input_security, input_fields in zip(p0[security].columns,
+                                                        p0[security].dtypes)
             ]
 
             if not all(present_fields):
-
                 missing_fields = [
-                    col for col, present in zip(
-                        p0[security].columns, present_fields
-                    )
+                    col for col, present in zip(p0[security].columns,
+                                                present_fields)
                     if not present
                 ]
                 raise Exception(
                     f'''
-                        Missing fields for security: {security} \n
+                        Missing/non-conforming fields for security: {security} \n
                         {missing_fields}
                     '''
                 )
@@ -197,11 +202,11 @@ class ToyPortfolio:
         else:
             raise Exception(f"mode: {mode} not valid")
 
-    def update_system(self,
-                      new_time_stamp):
+    def update_system(self):
 
+        data_event = self.queues['db_endpoint'].get()
 
-        self._update_mtm()
+        self._update_mtm(data_event['data'])
 
     def _update_pnl(self):
         pass
@@ -210,10 +215,18 @@ class ToyPortfolio:
                     new_time_stamp,
                     data):
 
-        last_time_stamp = self.positions['equity']['date'][-1]
+        if set(data.columns) != {'date', 'ticker', 'price'}:
+            logger.error('columns passed to update_mtm are not conforming')
+            return
 
-        if set(data.columns) != {'date', 'ticker'}:
-            raise Exception('data passed to updated_mtm is not conforming')
+        position_last_time_stamp = self.positions['equity']['date'].max()
+        positions_last_amount = (
+            self.positions['equity']
+            .filter(pl.col('date') == position_last_time_stamp)
+            .select('date', 'amount', 'ccy', 'ticker')
+        )
+
+
 
 
         if self.mtm is None:
@@ -228,7 +241,7 @@ class ToyPortfolio:
         else:
             df_0 = (
                 self.positions['equity']
-                .filter(pl.col('date')==last_time_stamp)
+                .filter(pl.col('date') == last_time_stamp)
                 .select(pl.all().exclude('cost_basis', 'ccy'))
                 .with_columns(
                     (pl.col('amount') * pl.col('price')).alias('mtm')
@@ -239,16 +252,39 @@ class ToyPortfolio:
                 items=[self.mtm, df_0], how='vertical', rechunk=True
             )
 
+    def connect_db_endpoint(self):
+
+        exchange = 'exchange_data_handler',
+        routing_keys = ['data_csv.*',]
+        connection_event = threading.Event()
+        t = threading.Thread(target=self._setup_db_endpoint,
+                             args=(exchange,
+                                   routing_keys,
+                                   connection_event,))
+
+        self.thread_tracker['endpoint_data_handler'] = t
+
+        t.start()
+
+    def close_db_endpoint(self):
+
+        id_endpoint = 'endpoint_data_handler'
+        self.rab_connections[id_endpoint].stop_plus_close()
+
+        if self.thread_tracker[id_endpoint].is_alive():
+            logger.warning('the db endpoint is still alive')
+        else:
+            logger.info('db endpoint closed succesfully')
 
     def _setup_db_endpoint(self,
                            exchange: str,
-                           routing_key: str,
+                           routing_keys: list,
                            connection_event: threading.Event):
 
         exchange = exchange or 'exchange_data_handler'
-        routing_key = routing_key or f'data_csv.equity'
+        routing_keys = routing_keys or [f'data_csv.equity']
         rab_con = RabbitConnection()
-        self.rab_connections['data_handler'] = rab_con
+        self.rab_connections['endpoint_data_handler'] = rab_con
         connection_event.set()
 
         rab_con.channel.exchange_declare(exchange=exchange,
@@ -262,55 +298,61 @@ class ToyPortfolio:
 
         queue_declare = queue_declare.method.queue
 
-        rab_con.channel.queue_bind(queue=queue_declare,
-                                   exchange=exchange,
-                                   routing_key=routing_key)
-
+        deque((rab_con.channel.queue_bind(queue=queue_declare,
+                                          exchange=exchange,
+                                          routing_key=rt)
+               for rt in routing_keys),
+              maxlen=0)
 
         def db_cllbck(ch, method, properties, body):
-            if properties.content_type != 'application/json':
-                logger.error('content type not json for message sent to db client')
-                raise Exception('content type not json for message sent to db client')
 
-            body = json.loads(body)
-            msg_security_type = body['security']['type']
+            db_directory = {
+                'equity': db_path + '/us_equity.parquet'
+            }
+
+            ch.basic_ack(method.delivery_tag)
+
+            if properties.content_type != 'application/json':
+                logger.warning('content type not json for message sent to db client')
+                logger.warning('event not processed')
+                return
+
+            msg = json.loads(body)
+            msg_security_type = msg['security']['type']
             msg_securities = body['security']['tickers']
             msg_time_stamp = dt.datetime.strptime(body['time_stamp'], '%Y%m%d%H%M%S')
-            positions_last_time_stamp = self.positions[msg_security_type]['date'][-1]
+            positions_last = (
+                self.positions[msg_security_type]
+                .filter(pl.col('date') == pl.col('date').max())
+            )
+            positions_last_time_stamp = positions_last['date'][0]
 
-            if (body['event'] == 'new_data') and (msg_time_stamp >= positions_last_time_stamp) :
+            if not ((body['event'] == 'new_data') and (msg_time_stamp >= positions_last_time_stamp)):
+                logger.warning(f'event new_data has a time stamp older than last position')
+                logger.warning(f'event not processed')
+                return
 
-                payload_fields = {sec: True if sec in msg_securities
-                                           else False
-                                           for sec in self.positions[msg_security_type]['ticker']}
-                if not all(payload_fields.values()):
-                    logger.error('the following tickers are not present in the data sent')
-                    logger.error(f'{[sec for sec, val in payload_fields.items() if val==False ]}')
+            payload_fields = {sec: True if sec in msg_securities
+                                       else False
+                                       for sec in positions_last['ticker']}
 
-                df = (
-                    pl.scan_parquet(db_path + '/us_equity.parquet')
-                    .filter(
-                        (pl.col('date') >= positions_last_time_stamp)
-                        and (pl.col('ticker').is_in())
-                    )
+            if not all(payload_fields.values()):
+                logger.warning('the following tickers are not present in the data sent')
+                logger.warning(f'{[sec for sec, val in payload_fields.items() if val==False ]}')
+                logger.warning('event not processed')
+                return
+
+            df = (
+                pl.scan_parquet(db_directory[msg_security_type])
+                .filter(
+                    (pl.col('date') == msg_time_stamp)
+                    & (pl.col('ticker').is_in(msg_securities))
                 )
+                .collect()
+            )
 
-                (
-                    pl.scan_parquet(db_path + '/us_equity.parquet')
-                    .collect()
-                    .filter(
-                        pl.col('date') <= dt.datetime.now()
-                    )
-                )
-
-
-
-
-
-
-
-
-
+            self.queues['updater_data'].put({'data': df,
+                                             'time_stamp': msg_time_stamp})
 
         rab_con.channel.basic_consume(queue=queue_declare,
                                       on_message_callback=db_cllbck)
@@ -323,7 +365,6 @@ class ToyPortfolio:
             exchange=name_exchange,
             exchange_type='direct',
         )
-
 
         queue_declare = rab_con.channel.queue_declare(queue='',
                                       passive=False,
@@ -342,8 +383,8 @@ class ToyPortfolio:
         rab_con.channel.basic_consume(queue=queue_declare,
                                       on_message_callback=db_rpc_cllbck)
 
-
         body_to_rpc = {'permission': 'acquire'}
+
         rab_con.channel.basic_publish(exchange=name_exchange,
                                       routing_key='rt_rpc_data_handler',
                                       body=json.dumps(body_to_rpc),

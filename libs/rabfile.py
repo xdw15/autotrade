@@ -32,7 +32,21 @@ class RabbitConnection:
 
         logger.info('RabbitMQ connection and channel initialized')
 
+    def close_connections_threadsafe(self):
+        self.connection.add_callback_threadsafe(
+            self.connection.close
+        )
+        logger.debug('connection was closed threadsafe-ly')
 
+    def stop_consuming_threadsafe(self):
+        self.connection.add_callback_threadsafe(
+            self.channel.stop_consuming
+        )
+        logger.debug('cosumer stoped threadsafe-ly')
+
+    def stop_plus_close(self):
+        self.stop_consuming_threadsafe()
+        self.close_connection_threadsafe()
 
 
 class RabbitConCSV:

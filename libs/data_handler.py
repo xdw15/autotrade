@@ -379,8 +379,6 @@ class DataHandlerPrimer:
         rab_con.connection.close()
         logger.debug('Data maintainer was shutdown')
 
-
-
     def start_db_rpc_api(self):
 
         connection_event = threading.Event()
@@ -416,10 +414,9 @@ class DataHandlerPrimer:
                 tag = 'open'
             else:
                 tag = 'closed'
-            logger.info('rpc_api closed')
+            logger.info(f'rpc_api closed, thread is {tag}')
         else:
             logger.info('rpc_api connection closed already')
-
 
     def _setup_db_rpc_api(self,
                           connection_event):
@@ -443,8 +440,7 @@ class DataHandlerPrimer:
                                    exchange=name_exchange,
                                    routing_key=f"rt_{name_queue}")
 
-
-        def rpc_cllbck(ch,method,properties,body):
+        def rpc_cllbck(ch, method, properties, body):
             if properties.content_type != 'application/json':
                 raise Exception(f"Content type not json or specified")
 
