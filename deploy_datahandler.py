@@ -1,9 +1,11 @@
+import pika
+
 from libs.config import *
 from libs.data_handler import *
 import logging
 
-logger = logging.getLogger('autotrade')
-logger.setLevel(logging.DEBUG)
+looger = logging.getLogger('autotrade')
+looger.setLevel(logging.DEBUG)
 log_FileHandler = logging.FileHandler(
     filename= work_path
     + f'/{__name__}_prueba_data_handler.log',
@@ -16,12 +18,12 @@ log_Formatter = logging.Formatter(
     style='{',
     validate=True
 )
-logger.addHandler(log_FileHandler)
+looger.addHandler(log_FileHandler)
 log_FileHandler.setFormatter(log_Formatter)
 
 log_stream_handler = logging.StreamHandler()
 log_stream_handler.setFormatter(log_Formatter)
-logger.addHandler(log_stream_handler)
+looger.addHandler(log_stream_handler)
 
 csvinfo = {
 
@@ -50,18 +52,7 @@ db_connections = {
 db_handler_app = DataHandlerPrimer(db_connections)
 db_handler_app.start_db_maintainer()
 
-db_handler_app.connect_csv_endpoint(['equity'], csv_client_connection)
+db_handler_app.connect_csv_endpoint(securities=['equity'],
+                                    generator=csv_client_connection)
 
 db_handler_app.start_db_rpc_api()
-
-db_handler_app.close_db_rpc_api()
-
-
-# db_handler_app.rab_connections['handler'].connection.is_open
-
-# db_handler_app.shutdown_event['csv_endpoint'].set()
-
-# db_handler_app.queue_db_handler.shu
-# for i in csv_client_connection(0):
-#     print(i)
-#     i['Equity']['date'][0].strftime('%Y%m%d%H%M%S')

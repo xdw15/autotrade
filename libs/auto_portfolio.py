@@ -7,16 +7,14 @@ from abc import ABC, abstractmethod
 import pika
 import datetime as dt
 import json
-from collections import  deque
+from collections import deque
 
-from charset_normalizer.md import getLogger
-
+#from charset_normalizer.md import getLogger
 from libs.config import *
 from libs.rabfile import RabbitConnection
 import logging
 
-
-logger = getLogger('autotrade.'+ __name__)
+logger = logging.getLogger('autotrade.' + __name__)
 
 
 class AutoPort(ABC):
@@ -255,11 +253,11 @@ class ToyPortfolio:
     def connect_db_endpoint(self):
 
         exchange = 'exchange_data_handler',
-        routing_keys = ['data_csv.*',]
+        rt = routing_keys['AutoPort_db_endpoint']
         connection_event = threading.Event()
         t = threading.Thread(target=self._setup_db_endpoint,
                              args=(exchange,
-                                   routing_keys,
+                                   rt,
                                    connection_event,))
 
         self.thread_tracker['endpoint_data_handler'] = t
@@ -395,7 +393,7 @@ class ToyPortfolio:
                                       )
         )
 
-
+        raise NotImplementedError
 
 
 

@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 import json
-import pika
 import polars as pl
-# import pika
 import time
 import threading
 from typing import Iterable, Generator
@@ -219,9 +217,7 @@ class DataAPICSV:
 class DataHandlerPrimer:
 
     def __init__(self,
-                 data_base_connections: dict,
-                 ):
-
+                 data_base_connections: dict):
         # <editor-fold desc="initializing the connection to the database">
         # assume the connection is just a path where to store the parquets
         # it will check if the path exists
@@ -329,8 +325,9 @@ class DataHandlerPrimer:
         while not self.shutdown_event['db_maintainer'].is_set():
 
             try:
-                queue_item = self.queue_db_handler.get(block=True, timeout=60)
+                queue_item = self.queue_db_handler.get(block=False)
             except queue.Empty:
+                rab_con.connection.sleep(5)
                 continue
 
             security = queue_item['info']
@@ -367,12 +364,6 @@ class DataHandlerPrimer:
                 properties=pika.BasicProperties(content_type='application/json')
             )
 
-            rab_con.channel.basic_publish(
-                exchange='exchange_data_handler',
-                routing_key=f'data_csv.{security}',
-                body=json.dumps(mensaje),
-                properties=pika.BasicProperties(content_type='application/json')
-            )
             logger.debug(f"data---{security}---sent: {time_stamp.strftime('%c')}")
             self.queue_db_handler.task_done()
 
@@ -392,7 +383,9 @@ class DataHandlerPrimer:
             while not connection_event.is_set():
                 pass
 
-    def close_db_rpc_api(self):
+        logger.info('db_rpc_api started')
+
+    def stop_db_rpc_api(self):
         if self.rab_connections['rpc_api'].connection.is_open:
             (
                 self.rab_connections['rpc_api']
@@ -430,11 +423,12 @@ class DataHandlerPrimer:
                                          exchange_type='direct',
                                          passive=False)
 
+        rab_con.channel.queue_delete(queue=name_queue)
         rab_con.channel.queue_declare(queue=name_queue,
                                       passive=False,
                                       exclusive=True,
-                                      arguments={'x-consumer-timeout': 180_000}
-                                      )
+                                      auto_delete=False,
+                                      arguments={'x-consumer-timeout': 180_000})
 
         rab_con.channel.queue_bind(queue=name_queue,
                                    exchange=name_exchange,
@@ -443,7 +437,6 @@ class DataHandlerPrimer:
         def rpc_cllbck(ch, method, properties, body):
             if properties.content_type != 'application/json':
                 raise Exception(f"Content type not json or specified")
-
 
             body = json.loads(body)
             if body['permission'] == 'acquire':
@@ -464,9 +457,11 @@ class DataHandlerPrimer:
 
         rab_con.channel.basic_qos(prefetch_count=1)
         rab_con.channel.basic_consume(queue=name_queue,
-                                      on_message_callback=rpc_cllbck)
+                                      on_message_callback=rpc_cllbck,
+                                      exclusive=True)
 
         rab_con.channel.start_consuming()
+        logger.info('db_rpc_api stopped')
 
 
 
