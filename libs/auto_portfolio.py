@@ -253,7 +253,7 @@ class ToyPortfolio:
     def connect_db_endpoint(self):
 
         exchange = 'exchange_data_handler',
-        rt = routing_keys['AutoPort_db_endpoint']
+        rt = all_routing_keys['AutoPort_db_endpoint']
         connection_event = threading.Event()
         t = threading.Thread(target=self._setup_db_endpoint,
                              args=(exchange,
@@ -276,11 +276,10 @@ class ToyPortfolio:
 
     def _setup_db_endpoint(self,
                            exchange: str,
-                           routing_keys: list,
+                           data_routing_keys: list,
                            connection_event: threading.Event):
 
         exchange = exchange or 'exchange_data_handler'
-        routing_keys = routing_keys or [f'data_csv.equity']
         rab_con = RabbitConnection()
         self.rab_connections['endpoint_data_handler'] = rab_con
         connection_event.set()
@@ -299,7 +298,7 @@ class ToyPortfolio:
         deque((rab_con.channel.queue_bind(queue=queue_declare,
                                           exchange=exchange,
                                           routing_key=rt)
-               for rt in routing_keys),
+               for rt in data_routing_keys),
               maxlen=0)
 
         def db_cllbck(ch, method, properties, body):
@@ -394,6 +393,44 @@ class ToyPortfolio:
         )
 
         raise NotImplementedError
+
+    def _start_autoexecution_rpc_client(self):
+
+
+        connection_event = threading.Event()
+        t = threading.Event(target=self._setup_autoexecution_rpc_client,
+                            args=())
+
+
+        self.thread_tracker['AutoExecution_rpc'] = t
+
+        t.start()
+
+
+    def _setup_autoexecution_rpc_client(self):
+
+        rab_con = RabbitConnection()
+        self.rab_connections['AutoExecution_rpc'] = rab_con
+
+        rab_con.channel.exchange_declare(**exchange_params['orders'])
+
+        queue_declare = rab_con.channel.queue_declare(queue='',
+                                      passive=False,
+                                      auto_delete=True)
+
+        queue_declare = queue_declare.method.queue
+        rab_con.channel.queue_bind(queue=queue_declare,
+                                   exchange=exchange_params['orders']['exchange'],
+                                   routing_key=queue_declare)
+
+        rab_con.channel.basic_consume(queue=queue_declare,
+                                      on_message_callback=self.callback_autoexecution,
+                                      auto_ack=False)
+
+    def callback_autoexecution(self, ch, method, properties, body):
+        
+
+
 
 
 

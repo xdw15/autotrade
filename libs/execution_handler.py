@@ -105,10 +105,7 @@ class AutoExecution:
         rab_con = RabbitConnection()
         self.rab_connections['order_router'] = rab_con
         start_event.set()
-        rab_con.channel.exchange_declare(exchange=exchange_names['orders'],
-                                         exchange_type='topic',
-                                         passive=False,
-                                         durable=True)
+        rab_con.channel.exchange_declare(**exchange_params['orders'])
 
         queue_declare = rab_con.channel.queue_declare(queue='rpc_order_router',
                                                       passive=False,
@@ -119,7 +116,7 @@ class AutoExecution:
         queue_declare = queue_declare.method.queue
 
         rab_con.channel.queue_bind(queue=queue_declare,
-                                   routing_key=routing_keys['order_consumer'])
+                                   routing_key=all_routing_keys['order_consumer'])
 
         rab_con.channel.basic_consume(queue=queue_declare,
                                       on_message_callback=self._order_router_cllbck,
@@ -142,16 +139,69 @@ class AutoExecution:
 
 
 
+import ib_async as ib
+
+ib_con = ib.IB()
+ib_con.connect(
+    port=4001,
+    clientId=0
+)
+
+ib_con.disconnect()
 
 
 
+a = ib_con.reqAllOpenOrders()
+
+a[0].order.orderId = 67
+for i in a:
+    # print(i.order.orderId)
+    ib_con.cancelOrder(i.order)
+
+
+ib_con.disconnect()
 
 
 
+contract_object = ib.Stock(symbol="QQQ",
+                           exchange="SMART",
+                           currency="USD")
+
+# trades_creados = []
 
 
+other_kwargs = {'tif': "DAY",
+                "account": "U9765800",
+                "clearingIntent": "IB"}
 
 
+order_object = ib.Order(orderType="LMT",
+                        action="BUY",
+                        totalQuantity=1,
+                        lmtPrice=490,
+                        **other_kwargs)
+
+
+    # trades_creados.append(ib_con.placeOrder(contract=contract_object,
+    #                   order=order_object))
+
+
+trade_object = ib_con.placeOrder(contract=contract_object,
+                  order=order_object)
+
+trade_object.orderStatus.status
+
+open_orders = ib_con.openOrders()
+
+order_from_phone = open_orders[0]
+order_from_phone.orderId = 10
+
+
+open_orders[1]
+a = ib_con.reqAllOpenOrders()
+
+for i in a:
+    ib_con.cancelOrder(i.order)
 
 
 
