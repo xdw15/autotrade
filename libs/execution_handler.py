@@ -105,7 +105,7 @@ class AutoExecution:
         rab_con = RabbitConnection()
         self.rab_connections['order_router'] = rab_con
         start_event.set()
-        rab_con.channel.exchange_declare(**exchange_params['orders'])
+        rab_con.channel.exchange_declare(**exchange_declarations['orders'])
 
         queue_declare = rab_con.channel.queue_declare(queue='rpc_order_router',
                                                       passive=False,
@@ -149,19 +149,17 @@ ib_con.connect(
 
 ib_con.disconnect()
 
-
+ib_con.Al
 
 a = ib_con.reqAllOpenOrders()
 
 a[0].order.orderId = 67
 for i in a:
-    # print(i.order.orderId)
+    # print(i.orderStatus.status)
     ib_con.cancelOrder(i.order)
 
 
 ib_con.disconnect()
-
-
 
 contract_object = ib.Stock(symbol="QQQ",
                            exchange="SMART",
@@ -194,8 +192,9 @@ trade_object.orderStatus.status
 open_orders = ib_con.openOrders()
 
 order_from_phone = open_orders[0]
-order_from_phone.orderId = 10
+order_from_phone.totalQuantity = 10
 
+ib_con.placeOrder(contract_object, order_from_phone)
 
 open_orders[1]
 a = ib_con.reqAllOpenOrders()

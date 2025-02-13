@@ -20,10 +20,9 @@ log_stream_handler.setFormatter(log_Formatter)
 logger.addHandler(log_stream_handler)
 
 
-dumb_strat = DumbStrat(
-    dt.date(2025,1,24),
-    'QQQ'
-)
+dumb_strat = DumbStrat(calibration_date=dt.date(2025, 1, 24),
+                       ticker='QQQ',
+                       signal_frequency=dt.timedelta(seconds=30))
 
 logger.debug(f'this is{__name__}')
 dumb_strat.connect_db_endpoint(

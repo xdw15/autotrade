@@ -8,7 +8,6 @@ import pika
 import datetime as dt
 import json
 from collections import deque
-from libs.risk_manager import *
 
 #from charset_normalizer.md import getLogger
 from libs.config import *
@@ -115,8 +114,7 @@ class ToyPortfolio:
         self.shutdown_event = {}
         self.thread_tracker = {}
         self.rab_connections = {}
-        self.order_tracker = {}
-        self.order_counter = 0
+
         # <editor-fold desc="instance updatables">
         self.mtm = None
         self.pnl = None
@@ -126,8 +124,6 @@ class ToyPortfolio:
         self.queues = {}
         self.queues['db_endpoint'] = queue.Queue()
         # </editor-fold>
-
-        self._start_risk_manager()
 
     @staticmethod
     def _init_composition(p0: dict,
@@ -392,33 +388,31 @@ class ToyPortfolio:
                                       properties=pika.BasicProperties(
                                           content_type='application/json',
                                           reply_to=queue_declare,
-                                      # correlation_id=
-                                      ))
+                                         # correlation_id=
+                                      )
+        )
 
         raise NotImplementedError
 
     def _start_autoexecution_rpc_client(self):
 
+
         connection_event = threading.Event()
         t = threading.Event(target=self._setup_autoexecution_rpc_client,
                             args=())
+
 
         self.thread_tracker['AutoExecution_rpc'] = t
 
         t.start()
 
-        with threading.Lock():
-            while not connection_event.is_set():
-                pass
-
-        logger.info('autoexecution_rpc_client started')
 
     def _setup_autoexecution_rpc_client(self):
 
         rab_con = RabbitConnection()
         self.rab_connections['AutoExecution_rpc'] = rab_con
 
-        rab_con.channel.exchange_declare(**exchange_declarations['OrderExecution'])
+        rab_con.channel.exchange_declare(**exchange_declarations['orders'])
 
         queue_declare = rab_con.channel.queue_declare(queue='',
                                       passive=False,
@@ -426,7 +420,7 @@ class ToyPortfolio:
 
         queue_declare = queue_declare.method.queue
         rab_con.channel.queue_bind(queue=queue_declare,
-                                   exchange=exchange_declarations['OrderExecution']['exchange'],
+                                   exchange=exchange_declarations['orders']['exchange'],
                                    routing_key=queue_declare)
 
         rab_con.channel.basic_consume(queue=queue_declare,
@@ -436,64 +430,30 @@ class ToyPortfolio:
     def callback_autoexecution(self, ch, method, properties, body):
         raise NotImplementedError
 
-    def _start_order_receiver_endpoint(self):
+    def _start_ordervenue_endpoint(self):
 
-        connection_event = threading.Event()
-        t = threading.Thread(target=self._setup_order_receiver_endpoint,
-                             args=(connection_event, ))
+        t = threading.Thread(target=self._setup_ordervenue_endpoint,
+                             args=())
 
-        self.thread_tracker['OrderReceiver'] = t
+        self.thread_tracker['OrderVenue'] = t
         t.start()
 
-
-    def _setup_order_receiver_endpoint(self, connection_event):
+    def _setup_ordervenue_endpoint(self):
 
         rab_con = RabbitConnection()
-        self.rab_connections['OrderReceiver'] = rab_con
-        connection_event.set()
-        rab_con.channel.exchange_declare(**exchange_declarations["OrderReceiver"])
-        queue_declare = rab_con.channel.queue_declare(**queue_declarations['OrderReceiver'])
+        self.rab_connections['OrderVenue'] = rab_con
 
-        queue_declare = queue_declare.method.queue
+        rab_con.dec
 
-        deque(
-            (rab_con.channel.queue_bind(queue=queue_declare,
-                                        exchange=exchange_declarations['OrderReceiver'],
-                                        routing_key=routing_key)
-             for routing_key in all_routing_keys['AutoPort_OrderReceiver'].values()),
-            maxlen=0)
 
-        rab_con.channel.basic_consume(queue=queue_declare,
-                                      on_message_callback=self._order_receiver_cllbck,
-                                      exclusive=True,
-                                      auto_ack=False)
-        rab_con.channel.start_consuming()
 
-    def _order_receiver_cllbck(self, ch, method, properties, body):
 
-        if properties.content_type != 'application/json':
-            logger.warning("an order sent to this application was not processed")
-            ch.basic_nack(method.delivery_tag)
-            return
 
-        # the order is parsed and passed to the risk_manager app for confirmation
-        body = json.loads(body)
-        self.order_counter += 1
-        body['order_tag'] = (body['time_stamp'].strptime('%y%m%d')
-                     + f'{self.order_counter:0>5}')
 
-        t = threading.Thread(target=self.risk_manager.confirm_trade,
-                             args=(body, ))
 
-        t.start()
 
-        self.order_tracker[body['order_tag']] = t
 
-        self.debug(f"order_{body['order_tag']} passed to risk_manager for confirmation")
 
-        ch.basic_ack(method.delivery_tag)
 
-    def _start_risk_manager(self):
-        self.risk_manager = AutoRiskManager(self)
 
 
