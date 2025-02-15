@@ -1,9 +1,14 @@
-from libs.auto_portfolio import ToyPortfolio
+import json
+
+import pika
+from libs.config import *
 from libs.rabfile import *
 import logging
 import datetime as dt
+import time
 
 logger = logging.getLogger('autotrade.' + __name__)
+
 
 class AutoRiskManager:
     def __init__(self, auto_portfolio):
@@ -11,22 +16,56 @@ class AutoRiskManager:
         self.pass_through_orders = True
         logger.info('Risk Manager started')
 
+        self.order_confirmations = {}
+
     def confirm_trade(self, order):
-        order_confirmation_flag = True
+        if order['secType'] == 'STK':
+            self.confirm_trade_stk(order)
+        else:
+            logger.warning(f"order_{order['order_itag']} not processed, secType not supported")
+
+    def confirm_trade_stk(self, order):
+        time.sleep(0.01)
         if not self.pass_through_orders:
-            order_confirmation_flag = False
-            logger.info(f"order_{order['order_tag']} not confirmed")
+            self.order_confirmations['order_itag'] = 0
+            logger.info(f"order_{order['order_itag']} not confirmed")
             return
 
         # create the order
-
 
         order_body = {'symbol': order['symbol'],
                       'orderType': 'LMT',
                       'action': order['action'],
                       'totalQuantity': 1,
                       'lmtPrice': order['signalPrice'],
+                      'secType': 'STK',
                       'origination_time_stamp': order['time_stamp'],
-                      'confirmation_time_stamp': dt.datetime.now().strftime('%y%m%d%H%M%S')}
+                      'confirmation_time_stamp': dt.datetime.now().strftime('%y%m%d%H%M%S'),
+                      'order_itag': order['order_itag']}
 
-        logger.debug(f"order_{order['order_tag']} confirmed and sent for execution")
+        rab_conections = self._auto_portfolio.rab_connections
+
+        if (not ('AutoExecution_client' in rab_conections)
+                or rab_conections['AutoExecution_client'].is_closed):
+            logger.warning(f"order_{order['order_itag']} can't be confirmed."
+                           + f"AutoExecution client is not open or doesn't exist")
+
+            self.order_confirmations['order_itag'] = -1
+            return
+
+        pika_basic_params = pika.BasicProperties(content_type='application/json',
+                             reply_to=self._auto_portfolio.rab_queues['AutoExecution_client'],
+                             correlation_id=order_body['order_itag'])
+
+        publish_order_params = {"exchange": exchange_declarations['OrderExecution']['exchange'],
+                                "routing_key": all_routing_keys['AutoExecution_server'],
+                                "body": json.dumps(order_body),
+                                "properties": pika_basic_params}
+
+        rab_conections['AutoExecution_client'].channel.basic_publish(
+            **publish_order_params
+        )
+
+        self.order_confirmations['order_itag'] = 1
+
+        logger.debug(f"order_{order['order_itag']} confirmed and sent for execution")

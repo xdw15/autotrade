@@ -169,7 +169,8 @@ class DumbStrat:
 
         signal_body = {'symbol': self.ticker,
                        'signalPrice': current_price,
-                       'time_stamp': time_stamp}
+                       'time_stamp': time_stamp,
+                       'secType': 'STK'}
 
         if current_price > self.day_ma:
             signal_body['action'] = "SELL"

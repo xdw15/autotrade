@@ -4,6 +4,9 @@ from os import getcwd
 work_path = getcwd().replace('\\', '/')
 db_path = work_path + '/synthetic_server_path'
 
+
+trading_router = 'ib'
+
 exchange_declarations = {
     'OrderExecution': {"exchange": 'execution_order_exchange',
                "exchange_type": "topic",
@@ -14,7 +17,7 @@ exchange_declarations = {
 }
 
 all_routing_keys = {
-    'order_consumer': 'rpc_order_consumer',
+    'AutoExecution_server': 'rt_autoexecution_rpc_server',
     'AutoPort_db_endpoint': ['data_csv.*',],
     'AutoPort_OrderReceiver': {'DumbStrat': 'DumbStrat_SignalSubscription'}
 }
@@ -23,15 +26,29 @@ queue_declarations = {
     'AutoPort_OrderReceiver': {'queue': 'AutoPort_OrderReceiver',
                                'passive': False,
                                'auto_delete': True,
-                               'exclusive': True}
+                               'exclusive': True},
+    'AutoExecution_rpc_server': {'queue': 'rpc_order_router',
+                                 'passive': False,
+                                 'auto_delete': True,
+                                 'exclusive': True,
+                                 'arguments': {'x-consumer-timeout': 1*60_000}}
 }
 
-ibg_params = {
-    'socket_port': 4001,
-    'master_api_client_id': 7,
-    'allowed_order_types': {'LMT'},
-}
+# hkrkyf760 - @Tomate4
+ib_mode = 'paper'
+ib_account = {'live': 'U9765800',
+              'paper': 'DU7219906'}
+ibg_connection_params = {
+    'port': 4001,
+    'clientId': 3,
+    'readonly': False,
+    'account': ib_account[ib_mode]}
 
 ib_order_kwargs = {'tif': "DAY",
-                   "account": "U9765800",
+                   "account": ib_account[ib_mode],
                    "clearingIntent": "IB"}
+
+
+
+
+

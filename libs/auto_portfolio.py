@@ -117,6 +117,7 @@ class ToyPortfolio:
         self.rab_connections = {}
         self.order_tracker = {}
         self.order_counter = 0
+        self.rab_queues = {}
         # <editor-fold desc="instance updatables">
         self.mtm = None
         self.pnl = None
@@ -416,8 +417,7 @@ class ToyPortfolio:
     def _setup_autoexecution_rpc_client(self):
 
         rab_con = RabbitConnection()
-        self.rab_connections['AutoExecution_rpc'] = rab_con
-
+        self.rab_connections['AutoExecution_client'] = rab_con
         rab_con.channel.exchange_declare(**exchange_declarations['OrderExecution'])
 
         queue_declare = rab_con.channel.queue_declare(queue='',
@@ -425,6 +425,7 @@ class ToyPortfolio:
                                       auto_delete=True)
 
         queue_declare = queue_declare.method.queue
+        self.rab_queues['AutoExecution_client'] = queue_declare
         rab_con.channel.queue_bind(queue=queue_declare,
                                    exchange=exchange_declarations['OrderExecution']['exchange'],
                                    routing_key=queue_declare)
@@ -445,6 +446,10 @@ class ToyPortfolio:
         self.thread_tracker['OrderReceiver'] = t
         t.start()
 
+        with threading.Lock():
+            while not connection_event.is_set():
+                pass
+        logger.info('OrderReceiver endpoint started')
 
     def _setup_order_receiver_endpoint(self, connection_event):
 
@@ -479,17 +484,14 @@ class ToyPortfolio:
         # the order is parsed and passed to the risk_manager app for confirmation
         body = json.loads(body)
         self.order_counter += 1
-        body['order_tag'] = (body['time_stamp'].strptime('%y%m%d')
-                     + f'{self.order_counter:0>5}')
+        body['order_itag'] = (body['time_stamp'].strptime('%y%m%d')
+                             + f'{self.order_counter:0>5}')
 
         t = threading.Thread(target=self.risk_manager.confirm_trade,
                              args=(body, ))
-
+        self.order_tracker[body['order_itag']] = {'thread': t}
         t.start()
-
-        self.order_tracker[body['order_tag']] = t
-
-        self.debug(f"order_{body['order_tag']} passed to risk_manager for confirmation")
+        self.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
 
         ch.basic_ack(method.delivery_tag)
 
