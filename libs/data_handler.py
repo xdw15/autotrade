@@ -151,7 +151,6 @@ class DataAPICSV:
                     .dt.replace_time_zone(None)
                     .alias('date')
                 )
-
             )
 
             self.time_stamps.append(

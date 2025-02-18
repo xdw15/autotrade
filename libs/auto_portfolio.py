@@ -117,7 +117,8 @@ class ToyPortfolio:
         self.rab_connections = {}
         self.order_tracker = {}
         self.order_counter = 0
-        self.rab_queues = {}
+        # self.rab_queues = {}
+        self.flags = {}
         # <editor-fold desc="instance updatables">
         self.mtm = None
         self.pnl = None
@@ -312,12 +313,14 @@ class ToyPortfolio:
                 'equity': db_path + '/us_equity.parquet'
             }
 
-            ch.basic_ack(method.delivery_tag)
 
             if properties.content_type != 'application/json':
                 logger.warning('content type not json for message sent to db client')
                 logger.warning('event not processed')
+                ch.basic_nack(method.delivery_tag)
                 return
+
+            ch.basic_ack(method.delivery_tag)
 
             msg = json.loads(body)
             msg_security_type = msg['security']['type']
@@ -335,8 +338,8 @@ class ToyPortfolio:
                 return
 
             payload_fields = {sec: True if sec in msg_securities
-                                       else False
-                                       for sec in positions_last['ticker']}
+            else False
+                              for sec in positions_last['ticker']}
 
             if not all(payload_fields.values()):
                 logger.warning('the following tickers are not present in the data sent')
@@ -357,7 +360,9 @@ class ToyPortfolio:
                                              'time_stamp': msg_time_stamp})
 
         rab_con.channel.basic_consume(queue=queue_declare,
-                                      on_message_callback=db_cllbck)
+                                      on_message_callback=db_cllbck,
+                                      auto_ack=False)
+        rab_con.channel.start_consuming()
 
     def _setup_db_rpc_client(self):
 
@@ -402,7 +407,7 @@ class ToyPortfolio:
 
         connection_event = threading.Event()
         t = threading.Event(target=self._setup_autoexecution_rpc_client,
-                            args=())
+                            args=(connection_event, ))
 
         self.thread_tracker['AutoExecution_rpc'] = t
 
@@ -410,11 +415,30 @@ class ToyPortfolio:
 
         with threading.Lock():
             while not connection_event.is_set():
-                pass
+                continue
+
+        self.flags['hb_autoexecution_client'] = True
+
+        t2 = threading.Thread(
+            target=self._heartbeat_rabcon,
+            args=(self.rab_connections['AutoExecution_client'],
+                  self.flags['hb_autoexecution_client'],
+                  'autoexecution_client'), )
+        t2.start()
+        self.thread_tracker['hb_AutoExecution_client'] = t2
 
         logger.info('autoexecution_rpc_client started')
 
-    def _setup_autoexecution_rpc_client(self):
+
+    @staticmethod
+    def _heartbeat_rabcon(con, flag, name, time_limit=1):
+
+        logger.debug(f"{name} heartbeat started")
+        while flag:
+            con.connection.process_data_events(time_limit=time_limit)
+        logger.debug(f"{name} heartbeat finished")
+
+    def _setup_autoexecution_rpc_client(self, _connection_event):
 
         rab_con = RabbitConnection()
         self.rab_connections['AutoExecution_client'] = rab_con
@@ -425,17 +449,27 @@ class ToyPortfolio:
                                       auto_delete=True)
 
         queue_declare = queue_declare.method.queue
-        self.rab_queues['AutoExecution_client'] = queue_declare
+        #self.rab_queues['AutoExecution_client'] = queue_declare
         rab_con.channel.queue_bind(queue=queue_declare,
                                    exchange=exchange_declarations['OrderExecution']['exchange'],
-                                   routing_key=queue_declare)
+                                   routing_key='autoexec_rpc_client')
 
+        def _callback_autoexecution(ch, method, properties, body):
+            if properties.content_type != 'application/json':
+                ch.basic_nack(method.delivery_tag)
+                logger.info('AutoExecution callback msg not processed')
+                return
+
+            body = json.loads(body)
+
+
+
+        _connection_event.set()
         rab_con.channel.basic_consume(queue=queue_declare,
-                                      on_message_callback=self.callback_autoexecution,
+                                      on_message_callback=_callback_autoexecution,
                                       auto_ack=False)
 
-    def callback_autoexecution(self, ch, method, properties, body):
-        raise NotImplementedError
+
 
     def _start_order_receiver_endpoint(self):
 
@@ -484,8 +518,8 @@ class ToyPortfolio:
         # the order is parsed and passed to the risk_manager app for confirmation
         body = json.loads(body)
         self.order_counter += 1
-        body['order_itag'] = (body['time_stamp'].strptime('%y%m%d')
-                             + f'{self.order_counter:0>5}')
+        body['order_itag'] = (body['time_stamp'][2:]
+                             + f'{self.order_counter:->5}')
 
         t = threading.Thread(target=self.risk_manager.confirm_trade,
                              args=(body, ))

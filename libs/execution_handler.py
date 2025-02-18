@@ -7,7 +7,9 @@ import polars as pl
 from libs.config import *
 from libs.rabfile import *
 import logging
-
+import json
+import datetime as dt
+from collections import deque
 
 logger = logging.getLogger('autotrade.' + __name__)
 
@@ -53,21 +55,122 @@ class AutoExecution:
 
     def __init__(self):
 
-        self.trading_api_connections = {}
+        self.trading_connections = {}
         self.rab_connections = {}
         self._connect_trading_apis()
         self._thread_tracker = {}
 
+        self.placed_orders = {}
+
+        self.filled_orders ={}
+        self.flags = {}
+
+
+        self.session_id = dt.datetime.now().strftime('%y%m%d%H%M%S')
+        self.reply_to_orders = {}
+
+
+        # start threads
+
         self._start_order_router()
+
 
     def _connect_trading_apis(self):
         self._connect_ib_api()
+        self._ib_placed_orders = {}
         self._connect_db_csv()
+
+    def _start_fill_publisher(self):
+
+        start_event = threading.Event()
+        t = threading.Thread(target=self._setup_fill_publisher, args=(start_event,))
+        t.start()
+        self._thread_tracker['fill_publisher'] = t
+
+        with threading.Lock():
+            while not start_event.is_set():
+                continue
+
+
+        self.flags['hb_fill_publisher'] = True
+        t2 = threading.Thread(target=self._heartbeat_rabcon,
+                              args=(self.rab_connections['fill_publisher'],
+                                    self.flags['hb_fill_publisher'],
+                                    'fill_publisher', ))
+        t2.start()
+        self._thread_tracker['hb_fill_publisher'] = t2
+
+
+        logger.info('fill_publisher started')
+
+    @staticmethod
+    def _heartbeat_rabcon(con, flag, name, time_limit=1):
+
+        logger.debug(f"{name} heartbeat started")
+        while flag:
+            con.connection.process_data_events(time_limit=time_limit)
+        logger.debug(f"{name} heartbeat finished")
+
+    def _setup_fill_publisher(self, _start_event):
+
+        rab_con = RabbitConnection()
+
+        self.rab_connections['fill_publisher'] = rab_con
+
+        _start_event.set()
+
+    def _update_fills(self):
+
+        if trading_router == 'ib':
+            filled_orders = self._ib_update_fills()
+        elif trading_router == 'csv':
+            filled_orders = self._csv_update_fills()
+        else:
+            raise Exception(f'{trading_router} not recognized')
+
+        if len(filled_orders) == 0:
+            logger.info(f"no fills for this timestamp")
+            return
+
+
+        db_fill_record = pl.read_parquet(work_path
+                                         +'/synthetic_server_path/auto_exec/fill_record.parquet')
+
+        (
+            pl.concat(items=[db_fill_record,
+                             filled_orders.with_columns(pl.lit(self.session_id).alias('sessionId'))],
+                      how='vertical', rechunk=True)
+            .write_parquet(work_path
+                           +'/synthetic_server_path/auto_exec/fill_record.parquet'
+                           )
+        )
+
+        rab_con = self.rab_connections['fill_publisher']
+
+        deque((self.placed_orders.pop(key) for key in filled_orders['order_itag']), maxlen=0)
+
+        for filled_tag in filled_orders['order_itag']:
+
+            body = {'order_itag': filled_tag,
+                    'sessionId': self.session_id}
+            body = json.dumps(body)
+            publisher = lambda: rab_con.channel.basic_publish(
+                exchange=exchange_declarations['OrderExecution']['exchange'],
+                routing_key=self.reply_to_orders[filled_tag],
+                body=body,
+                properties=pika.BasicProperties(content_type='application/json'))
+
+            rab_con.connection.add_callback_threadsafe(publisher)
+            self.filled_orders[filled_tag] = True
+
+
+        logger.info('fill events updated')
+
 
     def _connect_ib_api(self):
         ib_con = ib.IB()
         ib_con.connect(**ibg_connection_params)
-        self.trading_api_connections['ib'] = ib_con
+        self.trading_connections['ib'] = ib_con
 
         logger.info(f"Connected to IB. ClientId: {ibg_connection_params['clientId']},"
                     + f"Account: {ibg_connection_params['account']}")
@@ -78,7 +181,7 @@ class AutoExecution:
             self._print_ib_open_trades(open_trades)
 
     @staticmethod
-    def _print_ib_open_trades(self, open_trades):
+    def _print_ib_open_trades(open_trades):
         from dateutil import tz
         show_fields = {'order': ['clientId', 'orderId',
                                  'action', 'totalQuantity',
@@ -114,8 +217,7 @@ class AutoExecution:
 
     def _ib_place_order(self, order_info):
 
-        ib_con = self.trading_api_connections['ib']
-
+        ib_con = self.trading_connections['IB']
         import ib_async as ib
         ib_con2 = ib.IB()
         ib_con2.connect(**ibg_connection_params)
@@ -133,26 +235,39 @@ class AutoExecution:
             lmtPrice=order_info['lmtPrice'],
             **ib_order_kwargs)
 
-        contract_object = ib.Stock(symbol='SPY',
+        contract_object = ib.Stock(symbol='QQQ',
                                    exchange='SMART',
                                    currency='USD')
 
 
         order_object = ib.LimitOrder(action='BUY',
                                      totalQuantity=3,
-                                     lmtPrice=615,
+                                     lmtPrice=478,
                                      **ib_order_kwargs)
 
         # order_object.lmtPrice = 615
-        trade3 = ib_con2.placeOrder(contract_object, order_object)
+        trade = ib_con.placeOrder(contract_object, order_object)
+
+        self.placed_orders[order_info['order_itag']] = {'internal_tag': trade.order.orderId,
+                                                        'client': 'IB',
+                                                        'clientId': ib_con.client.clientId,
+                                                        'totalQty': order_info['totalQuantity'],
+                                                        'order_itag': order_info['order_itag']}
+
+
+
+        logger.info(f"order_{order_info['order_itag']} placed via IB")
+
 
         cancel_order = ib_con2.cancelOrder(b[0].order)
 
-        a = ib_con2.reqAllOpenOrders()
+        a = ib_con2.trades()
         b = ib_con2.openTrades()
+        ib.util.df(  ib_con2.fills() )
+
 
         order_object = b[0].order
-
+        ib_con2.fills()
 
         xd = ib.util.df(b)
 
@@ -160,7 +275,71 @@ class AutoExecution:
 
         ib_con2.disconnect()
 
+    def _ib_update_fills(self):
+
+        fills_fields = ['time', 'symbol', 'acctNumber', 'exchange',
+                        'side', 'shares', 'price', 'permId',
+                        'clientId',	'orderId', 'cumQty',
+                        'avgPrice', 'commission']
+
+        # fills = ib.util.df(ib_con2.fills())
+        fills = ib.util.df(self.trading_connections['IB'].fills())
+
+        fills = ( [ fills[['time']] ]
+                 + [ib.util.df(fills[c].to_list())
+                    for c in
+                    ['contract', 'execution', 'commissionReport']
+                 ]
+        )
+        from pandas import concat
+        fills = concat(fills, axis='columns')[fills_fields]
+        fills = (
+            pl.from_pandas(fills.loc[:,~fills.columns.duplicated('last')])
+            .with_columns(
+                pl.col('time').dt.convert_time_zone('America/Lima')
+                .dt.replace_time_zone(None)
+                .dt.cast_time_unit('ms'))
+            .rename({'orderId': 'internal_tag',
+                     'cumQty': 'totalQty'})
+            .select('clientId', 'totalQty', 'internal_tag',
+                    'avgPrice', 'commission', 'time')
+        )
+
+
+        placed_orders = (
+            pl.DataFrame(data=self.placed_orders.values(),
+                         schema_overrides={'totalQty': pl.Float64})
+            .filter(pl.col('client')=='IB')
+        )
+        placed_orders2 = (
+            pl.DataFrame(data={'internal_tag': 23, 'clientId': 7, 'totalQty': 23},
+                         schema_overrides={'totalQty': pl.Float64})
+        )
+
+
+        filled_orders = placed_orders.join(
+            other=fills,
+            on=['internal_tag', 'clientId', 'totalQty'],
+            how='inner',
+            coalesce=True
+        )
+
+        if len(filled_orders) == 0:
+            logger.debug('no trades filled in IB')
+            return []
+
+        return[filled_orders.select('order_itag','time',
+                                    'client', 'totalQty',
+                                    'avgPrice', 'commission')]
+
+
+
+
     def _db_csv_place_order(self, order_info):
+        raise NotImplementedError
+
+    def _csv_update_fills(self):
+        return []
 
     def _connect_db_csv(self):
         pass
@@ -170,7 +349,10 @@ class AutoExecution:
             self._ib_place_order(order_info)
         elif trading_router == 'csv':
             self._db_csv_place_order(order_info)
+        else:
+            raise Exception('trading_router not recognized')
 
+        return trading_router
     def _start_autoexecuton_rpc_server(self):
 
         connection_event = threading.Event()
@@ -190,7 +372,6 @@ class AutoExecution:
 
         rab_con = RabbitConnection()
         self.rab_connections['order_router'] = rab_con
-        _connection_event.set()
         rab_con.channel.exchange_declare(**exchange_declarations['OrderExecution'])
 
         queue_declare = rab_con.channel.queue_declare(
@@ -207,6 +388,7 @@ class AutoExecution:
                                       exclusive=True,
                                       auto_ack=False)
 
+        _connection_event.set()
         rab_con.channel.start_consuming()
 
     def _autoexecution_rpc_server_cllbck(self, ch, method, properties, body):
@@ -214,11 +396,16 @@ class AutoExecution:
         pika.BasicProperties(content_type='application/json')
 
         if properties.content_type != 'application/json':
-            logger.error(f"order sent to rpc server not processed")
+            logger.error(f"order sent to AutoExecution server not processed")
             ch.basic_nack(method.delivery_tag)
             return
 
-        raise NotImplementedError
+        body = json.loads(body)
+        api = self.place_order(body)
+
+        print(f"order_{body['order_itag']} placed succesfully via api {api}")
+
+        self.reply_to_orders[body['order_itag']] = properties.reply_to
 
 
 
@@ -227,9 +414,23 @@ class AutoExecution:
 
 
 
-
-
-
+# i just want you to take a moment to remember that ten years ago
+# you sat down to take a mock college admission test. It was the
+# first time that you were competing with a bigger pool of people.
+# or at least the first time you were physically aware of it.
+# I know that we are not down for reminiscing of the past.
+# But this is differente because that Marcelo from ten years ago
+# had no idea what he would be ten years forward. Nor do I know
+# what will be of me ten years from now. The idea I am laying out
+# is that, just like me and every other moment, Marcelo from the
+# future is counting on me. Counting on me being happy now, feeling
+# blessed for living the very same moments we are cheerishing from
+# the past. Because these moments, are as precious as they were ten
+# years in the past. They are everything, they are really worth
+# enjoying, because it is us. Because as long as it is us, we will
+# be happy. Just make yourself happy and everyone else happy by
+# living and being aware of the present. The more aware of how blessed
+# we are for the now, the more present in the now we will be.
 
 
 import ib_async as ib

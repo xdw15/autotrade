@@ -36,7 +36,7 @@ class AutoRiskManager:
         order_body = {'symbol': order['symbol'],
                       'orderType': 'LMT',
                       'action': order['action'],
-                      'totalQuantity': 1,
+                      'totalQuantity': 1, # for now
                       'lmtPrice': order['signalPrice'],
                       'secType': 'STK',
                       'origination_time_stamp': order['time_stamp'],
@@ -62,8 +62,10 @@ class AutoRiskManager:
                                 "body": json.dumps(order_body),
                                 "properties": pika_basic_params}
 
-        rab_conections['AutoExecution_client'].channel.basic_publish(
-            **publish_order_params
+        rab_conections['AutoExecution_client'].connection.add_callback_threadsafe(
+            lambda: rab_conections['AutoExecution_client'].channel.basic_publish(
+                **publish_order_params
+            )
         )
 
         self.order_confirmations['order_itag'] = 1
