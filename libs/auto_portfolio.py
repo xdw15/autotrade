@@ -99,9 +99,9 @@ class ToyPortfolio:
     """
 
     def __init__(self,
-            initial_holdings: dict,
-            time_stamp: str,
-            price_ccy: str = None):
+                 initial_holdings: dict,
+                 time_stamp: str,
+                 price_ccy: str = None):
 
         time_stamp = dt.datetime.strptime(time_stamp, '%Y%m%d%H%M%S')
 
@@ -117,7 +117,6 @@ class ToyPortfolio:
         self.rab_connections = {}
         self.order_tracker = {}
         self.order_counter = 0
-        # self.rab_queues = {}
         self.flags = {}
         # <editor-fold desc="instance updatables">
         self.mtm = None
@@ -126,7 +125,6 @@ class ToyPortfolio:
 
         # <editor-fold desc="instance queue container">
         self.queues = {}
-        self.queues['db_endpoint'] = queue.Queue()
         # </editor-fold>
 
         self._start_risk_manager()
@@ -267,8 +265,8 @@ class ToyPortfolio:
                                    connection_event,))
 
         self.thread_tracker['endpoint_data_handler'] = t
-
         t.start()
+        self.queues['db_endpoint'] = queue.Queue()
 
     def close_db_endpoint(self):
 
@@ -288,16 +286,15 @@ class ToyPortfolio:
         exchange = exchange or 'exchange_data_handler'
         rab_con = RabbitConnection()
         self.rab_connections['endpoint_data_handler'] = rab_con
-        connection_event.set()
 
         rab_con.channel.exchange_declare(exchange=exchange,
                                          exchange_type='topic',
                                          passive=False)
 
         queue_declare = rab_con.channel.queue_declare(queue='',
-                                      exclusive=True,
-                                      auto_delete=True,
-                                      passive=False)
+                                                      exclusive=True,
+                                                      auto_delete=True,
+                                                      passive=False)
 
         queue_declare = queue_declare.method.queue
 
@@ -312,7 +309,6 @@ class ToyPortfolio:
             db_directory = {
                 'equity': db_path + '/us_equity.parquet'
             }
-
 
             if properties.content_type != 'application/json':
                 logger.warning('content type not json for message sent to db client')
@@ -332,7 +328,7 @@ class ToyPortfolio:
             )
             positions_last_time_stamp = positions_last['date'][0]
 
-            if not ((body['event'] == 'new_data') and (msg_time_stamp >= positions_last_time_stamp)):
+            if not ((body['event'] == 'new_data') and (msg_time_stamp > positions_last_time_stamp)):
                 logger.warning(f'event new_data has a time stamp older than last position')
                 logger.warning(f'event not processed')
                 return
@@ -356,12 +352,13 @@ class ToyPortfolio:
                 .collect()
             )
 
-            self.queues['updater_data'].put({'data': df,
-                                             'time_stamp': msg_time_stamp})
+            self.queues['db_endpoint'].put({'data': df,
+                                            'time_stamp': msg_time_stamp})
 
         rab_con.channel.basic_consume(queue=queue_declare,
                                       on_message_callback=db_cllbck,
                                       auto_ack=False)
+        connection_event.set()
         rab_con.channel.start_consuming()
 
     def _setup_db_rpc_client(self):
@@ -374,8 +371,8 @@ class ToyPortfolio:
         )
 
         queue_declare = rab_con.channel.queue_declare(queue='',
-                                      passive=False,
-                                      exclusive=True)
+                                                      passive=False,
+                                                      exclusive=True)
         queue_declare = queue_declare.method.queue
 
         rt_key = f"rt_{queue_declare}"
@@ -398,7 +395,7 @@ class ToyPortfolio:
                                       properties=pika.BasicProperties(
                                           content_type='application/json',
                                           reply_to=queue_declare,
-                                      # correlation_id=
+                                          # correlation_id=
                                       ))
 
         raise NotImplementedError
@@ -445,14 +442,14 @@ class ToyPortfolio:
         rab_con.channel.exchange_declare(**exchange_declarations['OrderExecution'])
 
         queue_declare = rab_con.channel.queue_declare(queue='',
-                                      passive=False,
-                                      auto_delete=True)
+                                                      passive=False,
+                                                      auto_delete=True)
 
         queue_declare = queue_declare.method.queue
-        #self.rab_queues['AutoExecution_client'] = queue_declare
+        rt_key = all_routing_keys['AutoExecution_client']
         rab_con.channel.queue_bind(queue=queue_declare,
                                    exchange=exchange_declarations['OrderExecution']['exchange'],
-                                   routing_key='autoexec_rpc_client')
+                                   routing_key=rt_key)
 
         def _callback_autoexecution(ch, method, properties, body):
             if properties.content_type != 'application/json':
@@ -519,7 +516,7 @@ class ToyPortfolio:
         body = json.loads(body)
         self.order_counter += 1
         body['order_itag'] = (body['time_stamp'][2:]
-                             + f'{self.order_counter:->5}')
+                              + f'{self.order_counter:->5}')
 
         t = threading.Thread(target=self.risk_manager.confirm_trade,
                              args=(body, ))

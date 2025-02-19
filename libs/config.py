@@ -18,6 +18,7 @@ exchange_declarations = {
 
 all_routing_keys = {
     'AutoExecution_server': 'rt_autoexecution_rpc_server',
+    'AutoExecution_client': 'rt_autoexecution_rpc_client',
     'AutoPort_db_endpoint': ['data_csv.*',],
     'AutoPort_OrderReceiver': {'DumbStrat': 'DumbStrat_SignalSubscription'}
 }

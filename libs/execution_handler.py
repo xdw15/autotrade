@@ -62,9 +62,8 @@ class AutoExecution:
 
         self.placed_orders = {}
 
-        self.filled_orders ={}
+        self.filled_orders = {}
         self.flags = {}
-
 
         self.session_id = dt.datetime.now().strftime('%y%m%d%H%M%S')
         self.reply_to_orders = {}
@@ -133,9 +132,8 @@ class AutoExecution:
             logger.info(f"no fills for this timestamp")
             return
 
-
         db_fill_record = pl.read_parquet(work_path
-                                         +'/synthetic_server_path/auto_exec/fill_record.parquet')
+                                         + '/synthetic_server_path/auto_exec/fill_record.parquet')
 
         (
             pl.concat(items=[db_fill_record,
@@ -164,7 +162,6 @@ class AutoExecution:
             rab_con.connection.add_callback_threadsafe(publisher)
             self.filled_orders[filled_tag] = True
 
-
         logger.info('fill events updated')
 
 
@@ -178,7 +175,7 @@ class AutoExecution:
 
         open_trades = ib_con.openTrades()
         # open_trades = ib_con2.trades()
-        if len(open_trades)>0:
+        if len(open_trades) > 0:
             self._print_ib_open_trades(open_trades)
 
     @staticmethod
@@ -225,10 +222,11 @@ class AutoExecution:
         ib_con2.positions()
         ib_con2.accountValues()
 
-        ib.util.df(ib_con2.accountValues())
-        contract_object = ib.Stock(symbol=order_info['symbol'],
-                                   exchange='SMART',
-                                   currency='USD')
+        ib.util.df(ib_con2.positions()).iloc[:,:3]
+        contract_object = ib.Contract(secType="STK",
+                                      symbol=order_info['symbol'],
+                                      exchange='SMART',
+                                      currency='USD')
 
         order_object = ib.LimitOrder(
             action=order_info['action'],
@@ -236,29 +234,33 @@ class AutoExecution:
             lmtPrice=order_info['lmtPrice'],
             **ib_order_kwargs)
 
-        contract_object = ib.Stock(symbol='QQQ',
-                                   exchange='SMART',
-                                   currency='USD')
+        contract_object = ib.Contract(secType='STK',
+                                      symbol='SPY',
+                                      exchange='SMART',
+                                      currency='USD')
 
 
-        order_object = ib.LimitOrder(action='BUY',
+        order_object = ib.LimitOrder(action='SELL',
                                      totalQuantity=3,
-                                     lmtPrice=478,
+                                     lmtPrice=610,
                                      **ib_order_kwargs)
 
         # order_object.lmtPrice = 615
+        trade = ib_con2.placeOrder(contract_object, order_object)
         trade = ib_con.placeOrder(contract_object, order_object)
 
-        self.placed_orders[order_info['order_itag']] = {'internal_tag': trade.order.orderId,
-                                                        'client': 'IB',
-                                                        'clientId': ib_con.client.clientId,
+        self.placed_orders[order_info['order_itag']] = {'api_internal_tag': trade.order.orderId,
+                                                        'api_client': 'IB',
+                                                        'api_clientId': ib_con.client.clientId,
+                                                        'secType': order_info['secType'],
+                                                        'orderType': order_info['orderType'],
+                                                        'side': order_info['action'],
                                                         'totalQty': order_info['totalQuantity'],
-                                                        'order_itag': order_info['order_itag']}
-
+                                                        'order_itag': order_info['order_itag'],
+                                                        'placed_time_stamp': dt.datetime.now()}
 
 
         logger.info(f"order_{order_info['order_itag']} placed via IB")
-
 
         cancel_order = ib_con2.cancelOrder(b[0].order)
 
@@ -267,6 +269,8 @@ class AutoExecution:
         ib.util.df(  ib_con2.fills() )
 
 
+        ib_con2.fills()[0].execution
+        c = ib_con2.reqAllOpenOrders()
         order_object = b[0].order
         ib_con2.fills()
 
@@ -283,7 +287,7 @@ class AutoExecution:
                         'clientId',	'orderId', 'cumQty',
                         'avgPrice', 'commission']
 
-        # fills = ib.util.df(ib_con2.fills())
+        fills = ib.util.df(ib_con2.fills())
         fills = ib.util.df(self.trading_connections['IB'].fills())
 
         fills = ( [ fills[['time']] ]
@@ -295,32 +299,35 @@ class AutoExecution:
         from pandas import concat
         fills = concat(fills, axis='columns')[fills_fields]
         fills = (
-            pl.from_pandas(fills.loc[:,~fills.columns.duplicated('last')])
+            pl.from_pandas(fills.loc[:, ~fills.columns.duplicated('last')])
             .with_columns(
                 pl.col('time').dt.convert_time_zone('America/Lima')
                 .dt.replace_time_zone(None)
                 .dt.cast_time_unit('ms'))
-            .rename({'orderId': 'internal_tag',
-                     'cumQty': 'totalQty'})
-            .select('clientId', 'totalQty', 'internal_tag',
-                    'avgPrice', 'commission', 'time')
+            .rename({'orderId': 'api_internal_tag',
+                     'clientId': 'api_clientId',
+                     'cumQty': 'totalQty',
+                     'time': 'fill_time_stamp'})
+            # .select('clientId', 'totalQty', 'api_internal_tag',
+            #         'avgPrice', 'commission', 'time')
+            .select(pl.all().exclude('side', 'permId',
+                                     'acctNumber', 'shares',
+                                     'price', 'exchange'))
         )
-
 
         placed_orders = (
             pl.DataFrame(data=self.placed_orders.values(),
                          schema_overrides={'totalQty': pl.Float64})
-            .filter(pl.col('client')=='IB')
+            .filter(pl.col('client') == 'IB')
         )
         placed_orders2 = (
             pl.DataFrame(data={'internal_tag': 23, 'clientId': 7, 'totalQty': 23},
                          schema_overrides={'totalQty': pl.Float64})
         )
 
-
         filled_orders = placed_orders.join(
             other=fills,
-            on=['internal_tag', 'clientId', 'totalQty'],
+            on=['api_internal_tag', 'api_clientId', 'totalQty'],
             how='inner',
             coalesce=True
         )
@@ -329,11 +336,7 @@ class AutoExecution:
             logger.debug('no trades filled in IB')
             return []
 
-        return[filled_orders.select('order_itag','time',
-                                    'client', 'totalQty',
-                                    'avgPrice', 'commission')]
-
-
+        return [filled_orders]
 
 
     def _db_csv_place_order(self, order_info):

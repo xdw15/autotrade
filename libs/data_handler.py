@@ -311,7 +311,7 @@ class DataHandlerPrimer:
         from libs.rabfile import RabbitConnection
 
         rab_con = RabbitConnection()
-        # self.rab_connections['handler'] = rab_con
+#        self.rab_connections['handler'] = rab_con
         rab_con.channel.exchange_declare(
             exchange='exchange_data_handler',
             exchange_type='topic',
@@ -417,7 +417,6 @@ class DataHandlerPrimer:
         name_queue = 'rpc_data_handler'
         rab_con = RabbitConnection()
         self.rab_connections['rpc_api'] = rab_con
-        connection_event.set()
         rab_con.channel.exchange_declare(exchange=name_exchange,
                                          exchange_type='direct',
                                          passive=False)
@@ -459,6 +458,7 @@ class DataHandlerPrimer:
                                       on_message_callback=rpc_cllbck,
                                       exclusive=True)
 
+        connection_event.set()
         rab_con.channel.start_consuming()
         logger.info('db_rpc_api stopped')
 

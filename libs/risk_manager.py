@@ -36,7 +36,7 @@ class AutoRiskManager:
         order_body = {'symbol': order['symbol'],
                       'orderType': 'LMT',
                       'action': order['action'],
-                      'totalQuantity': 1, # for now
+                      'totalQuantity': 1,  # for now
                       'lmtPrice': order['signalPrice'],
                       'secType': 'STK',
                       'origination_time_stamp': order['time_stamp'],
@@ -54,7 +54,7 @@ class AutoRiskManager:
             return
 
         pika_basic_params = pika.BasicProperties(content_type='application/json',
-                             reply_to=self._auto_portfolio.rab_queues['AutoExecution_client'],
+                             reply_to=all_routing_keys['AutoExecution_client'],
                              correlation_id=order_body['order_itag'])
 
         publish_order_params = {"exchange": exchange_declarations['OrderExecution']['exchange'],
