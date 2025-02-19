@@ -100,7 +100,7 @@ class AutoExecution:
         t2.start()
         self._thread_tracker['hb_fill_publisher'] = t2
 
-
+        # 0ta 0ara 0r9bar
         logger.info('fill_publisher started')
 
     @staticmethod
