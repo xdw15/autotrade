@@ -53,30 +53,63 @@ class ExecutionHandlerApp(ABC):
 
 class AutoExecution:
 
-    def __init__(self):
+    def __init__(self,
+                 auto_update=True,
+                 update_freq=10):
 
         self.trading_connections = {}
         self.rab_connections = {}
-        self._connect_trading_apis()
         self._thread_tracker = {}
 
         self.placed_orders = {}
 
-        self.filled_orders = {}
         self.flags = {}
 
-        self.session_id = dt.datetime.now().strftime('%y%m%d%H%M%S')
-        self.reply_to_orders = {}
+        self.session_id = dt.datetime.now().strftime('%y%m%d')
+        # self.reply_to_orders = {}
 
-
+        self.auto_update = auto_update
+        self.update_freq = update_freq
         # start threads
+        self._start_autoexecution()
 
-        self._start_order_router()
+    def _start_autoexecution(self):
+        self._connect_trading_apis()
+        self._start_fill_publisher()
+        self._start_autoexecuton_rpc_server()
+        if self.auto_update:
+            self._start_autoupdate()
 
+    def _start_autoupdate(self):
+
+        t = threading.Thread(target=self._setup_autoupdate,
+                             args=())
+        t.start()
+        self._thread_tracker['auto_update'] = t
+
+    def _setup_autoupdate(self):
+
+        while self.auto_update:
+            with threading.Lock():
+                self.update_system()
+                time.sleep(self.update_freq)
+
+        logger.info('autoupdate stopped')
+        print('autoupdate stopped')
+
+    def stop_autoupdate(self):
+        self.auto_update = False
+        while self._thread_tracker['auto_update'].is_alive():
+            pass
+
+    def update_system(self):
+        timestamp = dt.datetime.now()
+        self._update_fills()
+        print(f"AutoExec updated - {timestamp.strftime('%c')}")
 
     def _connect_trading_apis(self):
         self._connect_ib_api()
-        self._ib_placed_orders = {}
+        # self._ib_placed_orders = {}
         self._connect_db_csv()
 
     def _start_fill_publisher(self):
@@ -89,7 +122,6 @@ class AutoExecution:
         with threading.Lock():
             while not start_event.is_set():
                 continue
-
 
         self.flags['hb_fill_publisher'] = True
         t2 = threading.Thread(target=self._heartbeat_rabcon,
@@ -129,46 +161,81 @@ class AutoExecution:
             raise Exception(f'{trading_router} not recognized')
 
         if len(filled_orders) == 0:
+            # print('No new fills')
             logger.info(f"no fills for this timestamp")
             return
 
+        # The program is supposed to concat multiple filled orders from several apis
+        # in this case there is only one appi so no concat needed
+        filled_orders = filled_orders[0]
+        unique_order_itag = filled_orders['order_itag'].unique()
+
+        # updating the db_fill and db_order
         db_fill_record = pl.read_parquet(work_path
                                          + '/synthetic_server_path/auto_exec/fill_record.parquet')
 
-        (
-            pl.concat(items=[db_fill_record,
-                             filled_orders.with_columns(pl.lit(self.session_id).alias('sessionId'))],
-                      how='vertical', rechunk=True)
-            .write_parquet(work_path
-                           +'/synthetic_server_path/auto_exec/fill_record.parquet'
-                           )
+        db_order_record = pl.read_parquet(work_path
+                                         + '/synthetic_server_path/auto_exec/order_record.parquet')
+
+        db_order_record = (db_order_record
+            .with_columns(
+                # update status
+                pl.when(pl.col('order_itag').is_in(unique_order_itag))
+                .then(pl.lit('filled'))
+                .otherwise(pl.col('status'))
+                .alias('status'),
+                # update status_timestamp
+                pl.when(pl.col('order_itag').is_in(unique_order_itag))
+                .then(pl.lit(dt.datetime.now()))
+                .otherwise(pl.col('status_timestamp'))
+                .alias('status_timestamp')
+            )
         )
 
+        orders_to_update = (db_order_record
+            .filter(pl.col('order_itag').is_in(unique_order_itag))
+            .select('order_itag', 'reply_to'))
+
+        if len(orders_to_update) != len(unique_order_itag):
+            logger.error('N of orders to update is not equal to fills')
+            raise Exception('N of orders to update is not equal to fills')
+
+        db_order_record.write_parquet(
+            work_path + '/synthetic_server_path/auto_exec/order_record.parquet'
+        )
+
+        (
+            pl.concat(items=[db_fill_record,
+                             filled_orders],
+                      how='vertical', rechunk=True)
+            .write_parquet(work_path
+                           + '/synthetic_server_path/auto_exec/fill_record.parquet')
+        )
+
+        # deque((self.placed_orders.pop(key) for key in unique_order_itag), maxlen=0)
+
         rab_con = self.rab_connections['fill_publisher']
-
-        deque((self.placed_orders.pop(key) for key in filled_orders['order_itag']), maxlen=0)
-
-        for filled_tag in filled_orders['order_itag']:
+        for filled_tag, reply_to_tag in zip(orders_to_update['order_itag'],
+                                            orders_to_update['reply_to']):
 
             body = {'order_itag': filled_tag,
                     'sessionId': self.session_id}
             body = json.dumps(body)
-            publisher = lambda: rab_con.channel.basic_publish(
+
+            def publisher(): return rab_con.channel.basic_publish(
                 exchange=exchange_declarations['OrderExecution']['exchange'],
-                routing_key=self.reply_to_orders[filled_tag],
+                routing_key=reply_to_tag,
                 body=body,
                 properties=pika.BasicProperties(content_type='application/json'))
 
             rab_con.connection.add_callback_threadsafe(publisher)
-            self.filled_orders[filled_tag] = True
 
         logger.info('fill events updated')
-
 
     def _connect_ib_api(self):
         ib_con = ib.IB()
         ib_con.connect(**ibg_connection_params)
-        self.trading_connections['ib'] = ib_con
+        self.trading_connections['IB'] = ib_con
 
         logger.info(f"Connected to IB. ClientId: {ibg_connection_params['clientId']},"
                     + f"Account: {ibg_connection_params['account']}")
@@ -212,17 +279,10 @@ class AutoExecution:
             print('The following trades were open before the connection started:')
             print(pl.DataFrame(open_trades_info))
 
-
     def _ib_place_order(self, order_info):
 
         ib_con = self.trading_connections['IB']
-        import ib_async as ib
-        ib_con2 = ib.IB()
-        ib_con2.connect(**ibg_connection_params)
-        ib_con2.positions()
-        ib_con2.accountValues()
 
-        ib.util.df(ib_con2.positions()).iloc[:,:3]
         contract_object = ib.Contract(secType="STK",
                                       symbol=order_info['symbol'],
                                       exchange='SMART',
@@ -234,68 +294,56 @@ class AutoExecution:
             lmtPrice=order_info['lmtPrice'],
             **ib_order_kwargs)
 
-        contract_object = ib.Contract(secType='STK',
-                                      symbol='SPY',
-                                      exchange='SMART',
-                                      currency='USD')
-
-
-        order_object = ib.LimitOrder(action='SELL',
-                                     totalQuantity=3,
-                                     lmtPrice=610,
-                                     **ib_order_kwargs)
-
-        # order_object.lmtPrice = 615
-        trade = ib_con2.placeOrder(contract_object, order_object)
         trade = ib_con.placeOrder(contract_object, order_object)
 
-        self.placed_orders[order_info['order_itag']] = {'api_internal_tag': trade.order.orderId,
-                                                        'api_client': 'IB',
-                                                        'api_clientId': ib_con.client.clientId,
-                                                        'secType': order_info['secType'],
-                                                        'orderType': order_info['orderType'],
-                                                        'side': order_info['action'],
-                                                        'totalQty': order_info['totalQuantity'],
-                                                        'order_itag': order_info['order_itag'],
-                                                        'placed_time_stamp': dt.datetime.now()}
+        # pick table up
 
+        db_order_record = pl.read_parquet(
+            work_path + '/synthetic_server_path/auto_exec/order_record.parquet'
+        )
+
+        # self.placed_orders[order_info['order_itag']] =
+        dta = pl.DataFrame(data={'sessionId': self.session_id,
+                                 'api_internal_tag': trade.order.orderId,
+                                'api_client': 'IB',
+                                'api_clientId': ib_con.client.clientId,
+                                'secId': order_info['symbol'],
+                                'secType': order_info['secType'],
+                                'orderType': order_info['orderType'],
+                                'side': order_info['action'],
+                                'totalQty': order_info['totalQuantity'],
+                                'order_itag': order_info['order_itag'],
+                                'placed_timestamp': dt.datetime.now(),
+                                'status': 'open',
+                                 'reply_to': order_info['reply_to']},
+                           schema_overrides={'totalQty': pl.Float64,
+                                             'placed_timestamp': pl.Datetime(time_unit='ms')})
+
+        (
+            pl.concat(items=[db_order_record, dta],
+                      how='vertical', rechunk=True)
+            .write_parquet(
+                work_path
+                + '/synthetic_server_path/auto_exec/order_record.parquet')
+        )
 
         logger.info(f"order_{order_info['order_itag']} placed via IB")
-
-        cancel_order = ib_con2.cancelOrder(b[0].order)
-
-        a = ib_con2.trades()
-        b = ib_con2.openTrades()
-        ib.util.df(  ib_con2.fills() )
-
-
-        ib_con2.fills()[0].execution
-        c = ib_con2.reqAllOpenOrders()
-        order_object = b[0].order
-        ib_con2.fills()
-
-        xd = ib.util.df(b)
-
-        ib_con2.positions()
-
-        ib_con2.disconnect()
 
     def _ib_update_fills(self):
 
         fills_fields = ['time', 'symbol', 'acctNumber', 'exchange',
                         'side', 'shares', 'price', 'permId',
                         'clientId',	'orderId', 'cumQty',
-                        'avgPrice', 'commission']
+                        'shares', 'avgPrice', 'commission']
 
-        fills = ib.util.df(ib_con2.fills())
         fills = ib.util.df(self.trading_connections['IB'].fills())
-
-        fills = ( [ fills[['time']] ]
+        if fills is None:
+            return []
+        fills = ([fills[['time']]]
                  + [ib.util.df(fills[c].to_list())
                     for c in
                     ['contract', 'execution', 'commissionReport']
-                 ]
-        )
+                 ])
         from pandas import concat
         fills = concat(fills, axis='columns')[fills_fields]
         fills = (
@@ -303,31 +351,37 @@ class AutoExecution:
             .with_columns(
                 pl.col('time').dt.convert_time_zone('America/Lima')
                 .dt.replace_time_zone(None)
-                .dt.cast_time_unit('ms'))
+                .dt.cast_time_unit('ms'),
+                pl.col('shares').sum().alias('totalQty'),
+                pl.col('shares').alias('tradeQty'))
             .rename({'orderId': 'api_internal_tag',
                      'clientId': 'api_clientId',
-                     'cumQty': 'totalQty',
+                     'symbol': 'secId',
+                     # 'cumQty': 'totalQty',
                      'time': 'fill_time_stamp'})
             # .select('clientId', 'totalQty', 'api_internal_tag',
             #         'avgPrice', 'commission', 'time')
             .select(pl.all().exclude('side', 'permId',
                                      'acctNumber', 'shares',
-                                     'price', 'exchange'))
+                                     'price', 'exchange', 'cumQty'))
         )
 
         placed_orders = (
-            pl.DataFrame(data=self.placed_orders.values(),
-                         schema_overrides={'totalQty': pl.Float64})
-            .filter(pl.col('client') == 'IB')
-        )
-        placed_orders2 = (
-            pl.DataFrame(data={'internal_tag': 23, 'clientId': 7, 'totalQty': 23},
-                         schema_overrides={'totalQty': pl.Float64})
+            # pl.DataFrame(data=self.placed_orders.values(),
+            #              schema_overrides={'totalQty': pl.Float64})
+            pl.read_parquet(
+                work_path
+                + '/synthetic_server_path/auto_exec/order_record.parquet'
+            )
+            .filter((pl.col('api_client') == 'IB')
+                    & (pl.col('status') == 'open')
+                    & (pl.col('sessionId') == self.session_id))
+            .drop('status', 'reply_to')
         )
 
         filled_orders = placed_orders.join(
             other=fills,
-            on=['api_internal_tag', 'api_clientId', 'totalQty'],
+            on=['api_internal_tag', 'api_clientId', 'totalQty', 'secId'],
             how='inner',
             coalesce=True
         )
@@ -354,9 +408,10 @@ class AutoExecution:
         elif trading_router == 'csv':
             self._db_csv_place_order(order_info)
         else:
-            raise Exception('trading_router not recognized')
+            raise Exception(f'{trading_router=} not recognized')
 
         return trading_router
+
     def _start_autoexecuton_rpc_server(self):
 
         connection_event = threading.Event()
@@ -366,7 +421,7 @@ class AutoExecution:
         self._thread_tracker['order_router'] = t
         t.start()
 
-        with threading.Lock:
+        with threading.Lock():
             while not connection_event.is_set():
                 pass
         logger.info('autoexecution rpc server started')
@@ -379,13 +434,15 @@ class AutoExecution:
         rab_con.channel.exchange_declare(**exchange_declarations['OrderExecution'])
 
         queue_declare = rab_con.channel.queue_declare(
-            **queue_declarations['AutoExecution_server']
+            **queue_declarations['AutoExecution_rpc_server']
         )
 
         queue_declare = queue_declare.method.queue
 
-        rab_con.channel.queue_bind(queue=queue_declare,
-                                   routing_key=all_routing_keys['AutoExecution_server'])
+        rab_con.channel.queue_bind(
+            queue=queue_declare,
+            exchange=exchange_declarations['OrderExecution']['exchange'],
+            routing_key=all_routing_keys['AutoExecution_server'])
 
         rab_con.channel.basic_consume(queue=queue_declare,
                                       on_message_callback=self._autoexecution_rpc_server_cllbck,
@@ -405,11 +462,13 @@ class AutoExecution:
             return
 
         body = json.loads(body)
+        body['reply_to'] = properties.reply_to
+
         api = self.place_order(body)
 
         print(f"order_{body['order_itag']} placed succesfully via api {api}")
 
-        self.reply_to_orders[body['order_itag']] = properties.reply_to
+        # self.reply_to_orders[body['order_itag']] = properties.reply_to
 
 
 
@@ -435,76 +494,6 @@ class AutoExecution:
 # be happy. Just make yourself happy and everyone else happy by
 # living and being aware of the present. The more aware of how blessed
 # we are for the now, the more present in the now we will be.
-
-
-import ib_async as ib
-
-ib_con = ib.IB()
-ib_con.connect(
-    port=4001,
-    clientId=0
-)
-
-ib_con.disconnect()
-
-ib_con.Al
-ib.Contract
-
-ib.Option
-
-a = ib_con.reqAllOpenOrders()
-
-a[0].order.orderId = 67
-for i in a:
-    # print(i.orderStatus.status)
-    ib_con.cancelOrder(i.order)
-
-
-ib_con.disconnect()
-
-contract_object = ib.Stock(symbol="QQQ",
-                           exchange="SMART",
-                           currency="USD")
-
-# trades_creados = []
-
-
-other_kwargs = {'tif': "DAY",
-                "account": "U9765800",
-                "clearingIntent": "IB"}
-
-
-order_object = ib.Order(orderType="LMT",
-                        action="BUY",
-                        totalQuantity=1,
-                        lmtPrice=490,
-                        **other_kwargs)
-
-
-    # trades_creados.append(ib_con.placeOrder(contract=contract_object,
-    #                   order=order_object))
-
-
-trade_object = ib_con.placeOrder(contract=contract_object,
-                  order=order_object)
-
-trade_object.orderStatus.status
-
-open_orders = ib_con.openOrders()
-
-order_from_phone = open_orders[0]
-order_from_phone.totalQuantity = 10
-
-ib_con.placeOrder(contract_object, order_from_phone)
-
-open_orders[1]
-a = ib_con.reqAllOpenOrders()
-
-for i in a:
-    ib_con.cancelOrder(i.order)
-
-
-
 
 
 

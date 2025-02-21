@@ -40,7 +40,7 @@ ib_mode = 'paper'
 ib_account = {'live': 'U9765800',
               'paper': 'DU7219906'}
 ibg_connection_params = {
-    'port': 4002,
+    'port': 4001,
     'clientId': 3,
     'readonly': False,
     'account': ib_account[ib_mode]}

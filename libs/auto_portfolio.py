@@ -426,7 +426,6 @@ class ToyPortfolio:
 
         logger.info('autoexecution_rpc_client started')
 
-
     @staticmethod
     def _heartbeat_rabcon(con, flag, name, time_limit=1):
 
@@ -459,14 +458,10 @@ class ToyPortfolio:
 
             body = json.loads(body)
 
-
-
         _connection_event.set()
         rab_con.channel.basic_consume(queue=queue_declare,
                                       on_message_callback=_callback_autoexecution,
                                       auto_ack=False)
-
-
 
     def _start_order_receiver_endpoint(self):
 
