@@ -184,7 +184,8 @@ class DumbStrat:
             body=json.dumps(body),
             exchange=exchange_declarations['OrderReceiver']['exchange'],
             routing_key=all_routing_keys['AutoPort_OrderReceiver']['DumbStrat'],
-            properties=pika.BasicProperties(content_type='application/json'))
+            properties=pika.BasicProperties(content_type='application/json',
+                                            correlation_id=''))
 
         self.last_signal_time_stamp = time_stamp
 

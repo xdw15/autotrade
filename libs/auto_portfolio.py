@@ -229,8 +229,6 @@ class ToyPortfolio:
         )
 
 
-
-
         if self.mtm is None:
             self.mtm = (
                 self.positions['equity']
@@ -426,14 +424,6 @@ class ToyPortfolio:
 
         logger.info('autoexecution_rpc_client started')
 
-    @staticmethod
-    def _heartbeat_rabcon(con, flag, name, time_limit=1):
-
-        logger.debug(f"{name} heartbeat started")
-        while flag:
-            con.connection.process_data_events(time_limit=time_limit)
-        logger.debug(f"{name} heartbeat finished")
-
     def _setup_autoexecution_rpc_client(self, _connection_event):
 
         rab_con = RabbitConnection()
@@ -513,15 +503,24 @@ class ToyPortfolio:
         body['order_itag'] = (body['time_stamp'][2:]
                               + f'{self.order_counter:->5}')
 
+        self.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
+        self.risk_manager.confirm_trade(body)
+
         t = threading.Thread(target=self.risk_manager.confirm_trade,
                              args=(body, ))
         self.order_tracker[body['order_itag']] = {'thread': t}
         t.start()
-        self.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
 
         ch.basic_ack(method.delivery_tag)
 
     def _start_risk_manager(self):
         self.risk_manager = AutoRiskManager(self)
 
+    @staticmethod
+    def _heartbeat_rabcon(con, flag, name, time_limit=1):
+
+        logger.debug(f"{name} heartbeat started")
+        while flag:
+            con.connection.process_data_events(time_limit=time_limit)
+        logger.debug(f"{name} heartbeat finished")
 

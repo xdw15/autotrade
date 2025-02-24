@@ -16,3 +16,5 @@ log_stream_handler.setFormatter(log_Formatter)
 logger.addHandler(log_stream_handler)
 
 auto_exec = AutoExecution()
+
+auto_exec.update_system()

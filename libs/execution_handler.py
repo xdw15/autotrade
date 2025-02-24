@@ -358,7 +358,7 @@ class AutoExecution:
                      'clientId': 'api_clientId',
                      'symbol': 'secId',
                      # 'cumQty': 'totalQty',
-                     'time': 'fill_time_stamp'})
+                     'time': 'fill_timestamp'})
             # .select('clientId', 'totalQty', 'api_internal_tag',
             #         'avgPrice', 'commission', 'time')
             .select(pl.all().exclude('side', 'permId',
