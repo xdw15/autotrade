@@ -392,7 +392,6 @@ class AutoExecution:
 
         return [filled_orders]
 
-
     def _db_csv_place_order(self, order_info):
         raise NotImplementedError
 

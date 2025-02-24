@@ -1,11 +1,12 @@
 import json
-
+import polars as pl
 import pika
-from libs.config import *
-from libs.rabfile import *
 import logging
 import datetime as dt
 import time
+from libs.config import *
+from libs.rabfile import *
+from libs.autoport_utils import *
 
 logger = logging.getLogger('autotrade.' + __name__)
 
@@ -70,4 +71,11 @@ class AutoRiskManager:
 
         self.order_confirmations['order_itag'] = 1
 
-        logger.debug(f"order_{order['order_itag']} confirmed and sent for execution")
+        new_row = {'order_id': order['order_itag'], 'status': 'dispatchedbyRM',
+                   'note': '', 'timestamp': dt.datetime.now()}
+        overrides = {'timestamp': pl.Datetime(time_unit='ms')}
+
+        with self._auto_portfolio.lock_readwrite:
+            update_blotter(new_row=new_row, overrides=overrides)
+
+        logger.debug(f"order_{order['order_itag']} confirmed and dispatched for execution")

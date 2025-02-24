@@ -13,6 +13,7 @@ from libs.risk_manager import *
 #from charset_normalizer.md import getLogger
 from libs.config import *
 from libs.rabfile import RabbitConnection
+from libs.autoport_utils import *
 import logging
 
 logger = logging.getLogger('autotrade.' + __name__)
@@ -118,6 +119,8 @@ class ToyPortfolio:
         self.order_tracker = {}
         self.order_counter = 0
         self.flags = {}
+        self.lock_readwrite = threading.Lock()
+
         # <editor-fold desc="instance updatables">
         self.mtm = None
         self.pnl = None
@@ -192,6 +195,9 @@ class ToyPortfolio:
             )
 
         return positions
+
+    def _start_risk_manager(self):
+        self.risk_manager = AutoRiskManager(self)
 
     def portfolio_process(self,
                           mode: str = 'auto',
@@ -448,6 +454,15 @@ class ToyPortfolio:
 
             body = json.loads(body)
 
+            new_row = {'order_itag': body['order_itag'],
+                       'status': 'fill_confirmed',
+                       'note': '',
+                       'timestamp': dt.datetime.now()}
+            overrides = {'timestamp': pl.Datetime(time_unit='ms')}
+
+            with self.lock_readwrite:
+                update_blotter(new_row, overrides)
+
         _connection_event.set()
         rab_con.channel.basic_consume(queue=queue_declare,
                                       on_message_callback=_callback_autoexecution,
@@ -503,18 +518,20 @@ class ToyPortfolio:
         body['order_itag'] = (body['time_stamp'][2:]
                               + f'{self.order_counter:->5}')
 
-        self.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
+        logger.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
         self.risk_manager.confirm_trade(body)
 
-        t = threading.Thread(target=self.risk_manager.confirm_trade,
-                             args=(body, ))
-        self.order_tracker[body['order_itag']] = {'thread': t}
-        t.start()
+        new_row = {'order_itag': body['order_itag'], 'status': 'receivedByCallback',
+                   'note': '', 'timestamp': dt.datetime.now()}
+        overrides = {'timestamp': pl.Datetime(time_unit='ms')}
+
+        with self.lock_readwrite:
+            update_blotter(new_row=new_row, overrides=overrides)
+
+        # self.order_tracker[body['order_itag']] = {'thread': t}
+        # t.start()
 
         ch.basic_ack(method.delivery_tag)
-
-    def _start_risk_manager(self):
-        self.risk_manager = AutoRiskManager(self)
 
     @staticmethod
     def _heartbeat_rabcon(con, flag, name, time_limit=1):
