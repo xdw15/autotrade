@@ -71,11 +71,13 @@ class AutoRiskManager:
 
         self.order_confirmations['order_itag'] = 1
 
+        # update blotter log
+        table = self._auto_portfolio.tables['blotLog']
         new_row = {'order_id': order['order_itag'], 'status': 'dispatchedbyRM',
                    'note': '', 'timestamp': dt.datetime.now()}
         overrides = {'timestamp': pl.Datetime(time_unit='ms')}
 
-        with self._auto_portfolio.lock_readwrite:
-            update_blotter(new_row=new_row, overrides=overrides)
+        with table.lock:
+            table.update(new_row=new_row, overrides=overrides)
 
         logger.debug(f"order_{order['order_itag']} confirmed and dispatched for execution")
