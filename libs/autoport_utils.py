@@ -78,3 +78,49 @@ def pl_addrow(df, new_row, overrides=None):
 
     df = pl.concat(items=[df, df_new_row], how='vertical', rechunk=True)
     return df
+
+ap_positions = pl.read_parquet(work_path
+                               + '/synthetic_server_path/auto_port/holdings/equity.parquet')
+
+
+(ap)
+
+(ap_positions
+ .with_columns(
+    pl.col('timestamp').dt.cast_time_unit(time_unit='ms'),
+    pl.col('port').cast(pl.String)
+)
+    .write_parquet(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet')
+ )
+
+schemaxd = (
+    pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet')
+
+)
+p0 = { 'equity': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet'),
+       'cash': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet')}
+
+all([True if input_security in supported_securities
+                    else False
+                    for input_security in p0.keys()])
+
+
+for security in supported_securities.keys():
+    present_fields = [
+        True if (input_security,
+                 input_fields) in supported_securities[security].items()
+        else False
+        for input_security, input_fields in p0[security].items()
+    ]
+    if not all(present_fields):
+        missing_fields = [
+            col for col, present in zip(p0[security].keys(),
+                                        present_fields)
+            if not present
+        ]
+        raise Exception(
+            f'''
+                Missing/non-conforming fields for security: {security} \n
+                {missing_fields}
+            '''
+        )

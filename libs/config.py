@@ -13,14 +13,18 @@ exchange_declarations = {
                "passive": False},
     'OrderReceiver': {"exchange": "placement_order_exchange",
                        "exchange_type": "topic",
-                       "passive": False}
+                       "passive": False},
+    'AutoPort_DH_endpoint': {'exchange': 'exchange_datahandler',
+                            'exchange_type': 'topic',
+                            'passive': False}
 }
 
 all_routing_keys = {
     'AutoExecution_server': 'rt_autoexecution_rpc_server',
     'AutoExecution_client': 'rt_autoexecution_rpc_client',
-    'AutoPort_db_endpoint': ['data_csv.*',],
+    'AutoPort_DH_endpoint': ['data_csv.*',],
     'AutoPort_OrderReceiver': {'DumbStrat': 'DumbStrat_SignalSubscription'}
+
 }
 
 queue_declarations = {
@@ -32,7 +36,11 @@ queue_declarations = {
                                  'passive': False,
                                  'auto_delete': True,
                                  'exclusive': True,
-                                 'arguments': {'x-consumer-timeout': 1*60_000}}
+                                 'arguments': {'x-consumer-timeout': 1*60_000}},
+    'AutoPort_DH_endpoint': {'queue': '',
+                            'exclusive': True,
+                            'auto_delete': True,
+                            'passive': False}
 }
 
 # hkrkyf760 - @Tomate4

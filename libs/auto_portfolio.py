@@ -134,12 +134,16 @@ class ToyPortfolio:
 
     @staticmethod
     def _init_composition(p0: dict,
-                          time_stamp: dt.datetime) -> dict:
+                          time_stamp: dt.datetime):
         """
         :param p0: a dict with each key containing
         a type of security with positions vector
         :return:
         """
+        p0 = {
+            'equity': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet'),
+            'cash': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet')
+        }
 
         # supported securities and required fields per security
         supported_securities = {
@@ -147,11 +151,15 @@ class ToyPortfolio:
                 'ccy': pl.String,
                 'amount': pl.Float64,
                 'cost_basis': pl.Float64,
-                'ticker': pl.String, },
+                'ticker': pl.String,
+                'port': pl.String,
+                'timestamp': pl.Datetime(time_unit='ms')},
             'cash': {
                 'ccy': pl.String,
                 'amount': pl.Float64,
-                'cost_basis': pl.Float64, }
+                'cost_basis': pl.Float64,
+                'port': pl.String,
+                'timestamp': pl.Datetime(time_unit='ms')}
         }
 
         # ensuring the securities provided are supported
@@ -183,18 +191,18 @@ class ToyPortfolio:
                     '''
                 )
 
-        # returning output
-        positions = {}
-        for security in supported_securities.keys():
-            positions[security] = (
-                p0[security]
-                .with_columns(
-                    pl.lit(time_stamp).alias('date')
-                )
-                .select(['date'] + p0[security].columns)
-            )
-
-        return positions
+        # # returning output
+        # positions = {}
+        # for security in supported_securities.keys():
+        #     positions[security] = (
+        #         p0[security]
+        #         .with_columns(
+        #             pl.lit(time_stamp).alias('date')
+        #         )
+        #         .select(['date'] + p0[security].columns)
+        #     )
+        #
+        # return positions
 
     def _start_risk_manager(self):
         self.risk_manager = AutoRiskManager(self)
@@ -212,7 +220,7 @@ class ToyPortfolio:
 
     def update_system(self):
 
-        data_event = self.queues['db_endpoint'].get()
+        data_event = self.queues['DH_endpoint'].get()
 
         self._update_mtm(data_event['data'])
 
@@ -260,21 +268,22 @@ class ToyPortfolio:
 
     def connect_db_endpoint(self):
 
-        exchange = 'exchange_data_handler',
-        rt = all_routing_keys['AutoPort_db_endpoint']
         connection_event = threading.Event()
         t = threading.Thread(target=self._setup_db_endpoint,
-                             args=(exchange,
-                                   rt,
-                                   connection_event,))
+                             args=(connection_event, ))
 
-        self.thread_tracker['endpoint_data_handler'] = t
+        self.thread_tracker['DH_endpoint'] = t
         t.start()
-        self.queues['db_endpoint'] = queue.Queue()
+        with threading.Lock():
+            while not connection_event.is_set():
+                continue
+
+        logger.info('DH_endpoint started')
+        self.queues['DH_endpoint'] = queue.Queue()
 
     def close_db_endpoint(self):
 
-        id_endpoint = 'endpoint_data_handler'
+        id_endpoint = 'DH_endpoint'
         self.rab_connections[id_endpoint].stop_plus_close()
 
         if self.thread_tracker[id_endpoint].is_alive():
@@ -283,30 +292,24 @@ class ToyPortfolio:
             logger.info('db endpoint closed succesfully')
 
     def _setup_db_endpoint(self,
-                           exchange: str,
-                           data_routing_keys: list,
                            connection_event: threading.Event):
 
-        exchange = exchange or 'exchange_data_handler'
+        # exchange = exchange or 'exchange_data_handler'
         rab_con = RabbitConnection()
         self.rab_connections['endpoint_data_handler'] = rab_con
 
-        rab_con.channel.exchange_declare(exchange=exchange,
-                                         exchange_type='topic',
-                                         passive=False)
+        rab_con.channel.exchange_declare(**exchange_declarations['AutoPort_DH_endpoint'])
 
-        queue_declare = rab_con.channel.queue_declare(queue='',
-                                                      exclusive=True,
-                                                      auto_delete=True,
-                                                      passive=False)
+        queue_declare = rab_con.channel.queue_declare(**queue_declarations['AutoPort_DH_endpoint'])
 
         queue_declare = queue_declare.method.queue
 
-        deque((rab_con.channel.queue_bind(queue=queue_declare,
-                                          exchange=exchange,
-                                          routing_key=rt)
-               for rt in data_routing_keys),
-              maxlen=0)
+        deque((rab_con.channel.queue_bind(
+            queue=queue_declare,
+            exchange=exchange_declarations['AutoPort_DH_endpoint']['exchange'],
+            routing_key=rt)
+            for rt in all_routing_keys['AutoPort_DH_endpoint']),
+            maxlen=0)
 
         def db_cllbck(ch, method, properties, body):
 
@@ -356,7 +359,7 @@ class ToyPortfolio:
                 .collect()
             )
 
-            self.queues['db_endpoint'].put({'data': df,
+            self.queues['DH_endpoint'].put({'data': df,
                                             'time_stamp': msg_time_stamp})
 
         rab_con.channel.basic_consume(queue=queue_declare,
@@ -414,10 +417,14 @@ class ToyPortfolio:
 
         t.start()
 
+        self.queues['fill_confirmations'] = queue.Queue()
+
         with threading.Lock():
             while not connection_event.is_set():
                 continue
 
+
+        # starting the publisher that serves the rpc-publishing part
         self.flags['hb_autoexecution_client'] = True
 
         t2 = threading.Thread(
@@ -462,6 +469,9 @@ class ToyPortfolio:
 
             with self.lock_readwrite:
                 update_blotter(new_row, overrides)
+
+            self.queues['fill_confirmations'].put(body['order_itag'])
+
 
         _connection_event.set()
         rab_con.channel.basic_consume(queue=queue_declare,
