@@ -126,9 +126,15 @@ p0 = {'equity': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_
 pos_equity = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet')
 blotter_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_log.parquet')
 fills = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet')
-orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet' )
+orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet')
 
-orders.get()['side']
+blotter_log.get()
+fills.get()
+orders.get()
+
+
+fills.get().columns
+orders.get()
 fills.get()['order_itag']
 
 date_event_timestamp = dt.datetime(2025, 1, 28, 10,0,0)
