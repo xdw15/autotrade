@@ -127,15 +127,12 @@ pos_equity = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdin
 blotter_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_log.parquet')
 fills = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet')
 orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet')
+blotter = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter.parquet')
 
+blotter.get()
 blotter_log.get()
 fills.get()
 orders.get()
-
-
-fills.get().columns
-orders.get()
-fills.get()['order_itag']
 
 date_event_timestamp = dt.datetime(2025, 1, 28, 10,0,0)
 

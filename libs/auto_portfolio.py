@@ -143,6 +143,10 @@ class ToyPortfolio:
             'blotLog': ParquetHandler(
                 work_path
                 + '/synthetic_server_path/auto_port/blotter_log.parquet'),
+            'blotter': ParquetHandler(
+                work_path
+                + '/synthetic_server_path/auto_port/blotter.parquet'),
+
         }
 
     @staticmethod
@@ -474,22 +478,17 @@ class ToyPortfolio:
 
             body = json.loads(body)
 
-            # new row for blotter
-            new_row = {'order_itag': body[]}
-
             # new row for blotter log
+            table = self.tables['blotLog']
             new_row = {'order_itag': body['order_itag'],
                        'status': 'fill_confirmed',
                        'note': '',
                        'timestamp': dt.datetime.now()}
             overrides = {'timestamp': pl.Datetime(time_unit='ms')}
 
-            table = self.tables['blotLog']
-
             with table.lock:
                 table.update(new_row=new_row,
-                               overrides=overrides)
-
+                             overrides=overrides)
 
             self.queues['fill_confirmations'].put(body['order_itag'])
 
@@ -549,12 +548,10 @@ class ToyPortfolio:
         body['order_itag'] = (body['time_stamp'][2:]
                               + f'{self.order_counter:->5}')
 
-        logger.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
-        self.risk_manager.confirm_trade(body)
-
         # update blotter
-        table = self.tables
-        new_row = {'order_itag': body['order_itag'],
+        table = self.tables['blotter']
+        new_row = {'timestamp': dt.datetime.now(),
+                   'order_itag': body['order_itag'],
                    'secId': body['symbol'],
                    'secType': body['secType'],
                    'side': body['action'],
@@ -563,25 +560,10 @@ class ToyPortfolio:
                    'orderParams': str(body['signalPrice']),
                    'placerId': properties.app_id}
 
-        pl.DataFrame(
-            [{'order_itag': 'order1',
-             'secId': 'SPY',
-             'secType': 'STK',
-             'side': 'SELL',
-             'tradeQty': 3,
-             'orderType': 'LMT',
-             'orderParams': '19.14',
-             'placerId': 'dumbme'},
-             {'order_itag': 'order1',
-              'secId': 'SPY',
-              'secType': 'STK',
-              'side': 'SELL',
-              'tradeQty': 3,
-              'orderType': 'LMT',
-              'orderParams': '19.14',
-              'placerId': 'dumbme'}
-             ]
-        )
+        overrides = {'timestamp': pl.Datetime(time_unit='ms')}
+
+        with table.lock:
+            table.update(new_row=new_row, overrides=overrides)
 
         # update blotter log
         table = self.tables['blotLog']
@@ -592,9 +574,11 @@ class ToyPortfolio:
         with table.lock:
             table.update(new_row=new_row, overrides=overrides)
 
+        # order dispatched to risk manager
+        logger.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
+        self.risk_manager.confirm_trade(body)
         # self.order_tracker[body['order_itag']] = {'thread': t}
         # t.start()
-
         ch.basic_ack(method.delivery_tag)
 
     @staticmethod
