@@ -122,28 +122,75 @@ def pl_addrow(df, new_row, overrides=None):
 p0 = {'equity': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet'),
       'cash': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet')}
 
-
+pos_cash = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet')
 pos_equity = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet')
 blotter_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_log.parquet')
 fills = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet')
 orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet')
 blotter = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter.parquet')
 
+
+
 blotter.get()
 blotter_log.get()
 fills.get()
 orders.get()
 
-date_event_timestamp = dt.datetime(2025, 1, 28, 10,0,0)
+pos_cash.get()
+pos_equity.get()
 
 
-blotter.get().filter(pl.col('timestamp') > date_event_timestamp)
+event_timestamp = dt.datetime(2025, 2, 22, 11,37,32)
+
+
+blotter.get().filter(pl.col('timestamp') > event_timestamp)
 
 start_timestamp = (pos_equity.get()
- .with_columns(secs=(pl.col.timestamp - date_event_timestamp).dt.total_seconds())
+ .with_columns(secs=(pl.col.timestamp - event_timestamp).dt.total_seconds())
  .with_columns(pl.when(pl.col.secs > 0).then(None).otherwise('secs').alias('secs'))
  .filter(pl.col.secs == pl.col.secs.max())['timestamp'].unique()
 )
+
+start_positions = (
+    pos_equity.get()
+    .filter(pl.col('timestamp') == start_timestamp)
+    .filter(pl.col.port == '1')
+)
+
+
+
+fills_filtered = (
+    fills.get()
+    .filter( (event_timestamp >= pl.col.fill_timestamp) &
+             ( pl.col.fill_timestamp > start_timestamp) )
+    .select('secId', 'secType', 'side', 'avgPrice', 'commission', 'tradeQty')
+    .with_columns(
+        trade_cost_basis = pl.when(pl.col.side == 'BUY')
+            .then(pl.col.avgPrice * pl.col.tradeQty + pl.col.commission)
+            .otherwise(-pl.col.avgPrice * pl.col.tradeQty + pl.col.commission),
+        amount_variation = pl.when(pl.col.side == 'BUY')
+            .then(pl.col.tradeQty)
+            .otherwise(-pl.col.tradeQty)
+    )
+    .group_by(['secType', 'secId'])
+    .agg(pl.col.trade_cost_basis.sum(),
+         pl.col.amount_delta.sum())
+    .drop('secType')
+)
+
+(
+    start_positions
+    .join(other=fills_filtered.rename({'secId': 'ticker'}),
+          on='ticker',
+          how='full',
+          coalesce=True)
+    .with_columns(timestamp=pl.lit(event_timestamp).dt.cast_time_unit(time_unit='ms'))
+
+)
+
+
+pos_equity.get()['timestamp'].unique()
+
 
 # adding one day fwd
 

@@ -172,7 +172,8 @@ class DumbStrat:
                        'time_stamp': body['time_stamp'],
                        'secType': 'STK',
                        'tradeQty': 1,
-                       'orderType': 'LMT', }
+                       'orderType': 'LMT',
+        }
 
         if current_price > self.day_ma:
             signal_body['action'] = "SELL"

@@ -106,10 +106,11 @@ class ToyPortfolio:
 
         time_stamp = dt.datetime.strptime(time_stamp, '%Y%m%d%H%M%S')
 
-        self.positions = self._init_composition(
-            initial_holdings,
-            time_stamp
-        )
+        # self.positions = self._init_composition(
+        #     initial_holdings,
+        #     time_stamp
+        # )
+        self._init_composition()
 
         self.price_ccy = price_ccy or 'USD'
 
@@ -165,7 +166,7 @@ class ToyPortfolio:
         # supported securities and required fields per security
         supported_securities = {
             'equity': {
-                'ccy': pl.String,
+                # 'ccy': pl.String,
                 'amount': pl.Float64,
                 'cost_basis': pl.Float64,
                 'ticker': pl.String,
