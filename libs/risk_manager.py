@@ -37,7 +37,7 @@ class AutoRiskManager:
         order_body = {'symbol': order['symbol'],
                       'orderType': 'LMT',
                       'action': order['action'],
-                      'totalQuantity': 1,  # for now
+                      'totalQuantity': order['tradeQty'],  # for now
                       'lmtPrice': order['signalPrice'],
                       'secType': 'STK',
                       'origination_time_stamp': order['time_stamp'],

@@ -147,7 +147,9 @@ class ToyPortfolio:
             'blotter': ParquetHandler(
                 work_path
                 + '/synthetic_server_path/auto_port/blotter.parquet'),
-
+            'blotAlloc': ParquetHandler(
+                work_path
+                + '/synthetic_server_path/auto_port/blotter_alloc.parquet'),
         }
 
     @staticmethod
@@ -551,7 +553,7 @@ class ToyPortfolio:
 
         # update blotter
         table = self.tables['blotter']
-        new_row = {'timestamp': dt.datetime.now(),
+        order_dic = {'timestamp': dt.datetime.now(),
                    'order_itag': body['order_itag'],
                    'secId': body['symbol'],
                    'secType': body['secType'],
@@ -559,16 +561,34 @@ class ToyPortfolio:
                    'tradeQty': body['tradeQty'],
                    'orderType': body['orderType'],
                    'orderParams': str(body['signalPrice']),
-                   'placerId': properties.app_id}
+                   'placerId': properties.app_id,
+                   # 'portAlloc': body['portAlloc'],
+                   # 'typeAlloc': body['typeAlloc'],
+        }
 
         overrides = {'timestamp': pl.Datetime(time_unit='ms')}
+
+        with table.lock:
+            table.update(new_row=order_dic, overrides=overrides)
+
+        # update blotter alloc
+
+        table = self.tables['blotAlloc']
+        new_row = []
+        for port_key in body['portAlloc']:
+            dic_unnested = {'timestamp': order_dic['timestamp'],
+                            'order_itag': order_dic['order_itag'],
+                            'port': port_key,
+                            'Alloc': body['portAlloc'][port_key],
+                            'typeAlloc': order_dic['typeAlloc']}
+            new_row.append(dic_unnested)
 
         with table.lock:
             table.update(new_row=new_row, overrides=overrides)
 
         # update blotter log
         table = self.tables['blotLog']
-        new_row = {'order_itag': body['order_itag'], 'status': 'receivedByCallback',
+        new_row = {'order_itag': body['order_itag'], 'status': 'receivedByAutoPort',
                    'note': '', 'timestamp': dt.datetime.now()}
         overrides = {'timestamp': pl.Datetime(time_unit='ms')}
 

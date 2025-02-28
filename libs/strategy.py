@@ -171,8 +171,12 @@ class DumbStrat:
                        'signalPrice': current_price,
                        'time_stamp': body['time_stamp'],
                        'secType': 'STK',
-                       'tradeQty': 1,
+                       'tradeQty': 4,
                        'orderType': 'LMT',
+                       # 'portAlloc': {'1': 0.9, '2': 0.1},
+                       # 'typeAlloc': 'percent',
+                       'portAlloc': {'1': 2, '2': 1},
+                       'typeAlloc': 'amount',
         }
 
         if current_price > self.day_ma:

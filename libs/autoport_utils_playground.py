@@ -98,6 +98,61 @@ class ParquetHandler:
         updated_df.write_parquet(self.path)
 
 
+class FillHandler(ParquetHandler):
+
+    def __init__(self, path, blotter_handler):
+        super().__init__(path)
+        self.blotter_alloc = blotter_handler
+
+    def fills_processing(self, date_start, date_end):
+        """
+        :param date_start: open (exclusive)
+        :param date_end:  closed (inclusive)
+        :return: fills processed
+        """
+        fills_filtered = (
+            self.get()
+            .filter((date_end >= pl.col.fill_timestamp)
+                    & (pl.col.fill_timestamp > date_start))
+            # .with_columns(pl.Series([]))
+            .select('secId', 'secType', 'side', 'avgPrice', 'commission', 'tradeQty', 'order_itag')
+            .with_columns(
+                trade_cost_basis=pl.when(pl.col.side == 'BUY')
+                .then(pl.col.avgPrice * pl.col.tradeQty + pl.col.commission)
+                .otherwise(-pl.col.avgPrice * pl.col.tradeQty + pl.col.commission),
+                amount_variation=pl.when(pl.col.side == 'BUY')
+                .then(pl.col.tradeQty)
+                .otherwise(-pl.col.tradeQty))
+            .group_by(['secType', 'secId', 'order_itag'])
+            .agg(pl.col.trade_cost_basis.sum(),
+                 pl.col.amount_variation.sum())
+            .join(other=(self.blotter_alloc.get()
+                         .unique(subset=['timestamp', 'order_itag', 'port'],
+                                 keep='last')
+                         .drop('timestamp')),
+                  on='order_itag',
+                  how='left',
+                  coalesce=True)
+            .with_columns(
+                amount_variation=pl.when(pl.col.typeAlloc == 'amount')
+                                 .then(pl.col.amount_variation.sign())
+                                 .otherwise(pl.col.amount_variation) * pl.col.Alloc,
+                trade_cost_basis=pl.when(pl.col.typeAlloc == 'amount')
+                                 .then((pl.col.Alloc / pl.col.amount_variation).abs())
+                                 .otherwise(pl.col.Alloc) * pl.col.trade_cost_basis
+            )
+            .select('secType', 'secId', 'trade_cost_basis', 'amount_variation', 'port')
+        )
+
+        return fills_filtered
+
+
+
+
+
+
+
+
 def update_blotter(new_row, overrides):
     path = work_path + '/synthetic_server_path/auto_port/blotter.parquet'
     df = get_blotter()
@@ -124,15 +179,17 @@ p0 = {'equity': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_
 
 pos_cash = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet')
 pos_equity = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet')
-blotter_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_log.parquet')
 fills = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet')
+
 orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet')
 blotter = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter.parquet')
-
-
+blotter_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_log.parquet')
+blotter_alloc = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_alloc.parquet')
+fills = FillHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet', blotter_alloc)
 
 blotter.get()
 blotter_log.get()
+blotter_alloc.get()
 fills.get()
 orders.get()
 
@@ -141,52 +198,64 @@ pos_equity.get()
 
 
 event_timestamp = dt.datetime(2025, 2, 22, 11,37,32)
+event_timestamp = dt.datetime(2025, 1, 22, 11,37,32)
 
 
 blotter.get().filter(pl.col('timestamp') > event_timestamp)
 
+
 start_timestamp = (pos_equity.get()
- .with_columns(secs=(pl.col.timestamp - event_timestamp).dt.total_seconds())
- .with_columns(pl.when(pl.col.secs > 0).then(None).otherwise('secs').alias('secs'))
- .filter(pl.col.secs == pl.col.secs.max())['timestamp'].unique()
+                   .with_columns(secs=(pl.col.timestamp - event_timestamp).dt.total_seconds())
+                   .with_columns(pl.when(pl.col.secs > 0).then(None).otherwise('secs').alias('secs'))
+                   .filter(pl.col.secs == pl.col.secs.max())['timestamp'].unique()
 )
 
 start_positions = (
     pos_equity.get()
     .filter(pl.col('timestamp') == start_timestamp)
-    .filter(pl.col.port == '1')
+    # .filter(pl.col.port == '1')
 )
 
 
+ts_to_update = pos_equity.get().filter(pl.col.timestamp > start_timestamp)['timestamp'].unique()
+ts_to_update.append(pl.Series([event_timestamp, ]).dt.cast_time_unit(time_unit='ms'))
+ts_to_update.append(start_timestamp)
+ts_to_update = ts_to_update.sort(descending=False)
 
-fills_filtered = (
-    fills.get()
-    .filter( (event_timestamp >= pl.col.fill_timestamp) &
-             ( pl.col.fill_timestamp > start_timestamp) )
-    .select('secId', 'secType', 'side', 'avgPrice', 'commission', 'tradeQty')
-    .with_columns(
-        trade_cost_basis = pl.when(pl.col.side == 'BUY')
-            .then(pl.col.avgPrice * pl.col.tradeQty + pl.col.commission)
-            .otherwise(-pl.col.avgPrice * pl.col.tradeQty + pl.col.commission),
-        amount_variation = pl.when(pl.col.side == 'BUY')
-            .then(pl.col.tradeQty)
-            .otherwise(-pl.col.tradeQty)
+agg_positions = []
+
+for ts_index in range(1, len(ts_to_update)):
+
+    fills_filtered = fills.fills_processing(ts_to_update[ts_index-1], ts_to_update[ts_index])
+
+    end_positions = (
+        start_positions # .filter(pl.col('port')=='xd')
+        .join(other=(fills_filtered # .filter(pl.col.port=='33333')
+                     .rename({'secId': 'ticker'})),
+              on=['ticker', 'port'],
+              how='full',
+              coalesce=True)
+        .with_columns(timestamp=ts_to_update[ts_index])
+        .with_columns([pl.col.port.fill_null('1')]
+            + [pl.col(col).fill_null(0)
+            for col in ['amount', 'avgPrice', 'trade_cost_basis', 'amount_variation']])
+        # se hace el calculo aca
+        .with_columns(
+            avgPrice=(pl.col.amount * pl.col.avgPrice
+                      + pl.col.trade_cost_basis)/(pl.col.amount + pl.col.amount_variation),
+            amount=pl.col.amount + pl.col.amount_variation
+        )
+        .select(start_positions.columns)
+        # .drop('trade_cost_basis', 'amount_variation')
     )
-    .group_by(['secType', 'secId'])
-    .agg(pl.col.trade_cost_basis.sum(),
-         pl.col.amount_delta.sum())
-    .drop('secType')
-)
 
-(
-    start_positions
-    .join(other=fills_filtered.rename({'secId': 'ticker'}),
-          on='ticker',
-          how='full',
-          coalesce=True)
-    .with_columns(timestamp=pl.lit(event_timestamp).dt.cast_time_unit(time_unit='ms'))
+    pos_cash.get()
 
-)
+    agg_positions.append(end_positions)
+    start_positions = end_positions
+
+
+agg_positions = pl.concat(items=agg_positions, how='vertical')
 
 
 pos_equity.get()['timestamp'].unique()
