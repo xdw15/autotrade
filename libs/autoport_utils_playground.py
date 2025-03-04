@@ -197,12 +197,12 @@ class FillHandler(ParquetHandler):
                   how='left',
                   coalesce=True)
             .with_columns(
+                trade_cost_basis=pl.when(pl.col.typeAlloc == 'amount')
+                                 .then((pl.col.Alloc / pl.col.amount_variation).abs())
+                                 .otherwise(pl.col.Alloc) * pl.col.trade_cost_basis,
                 amount_variation=pl.when(pl.col.typeAlloc == 'amount')
                                  .then(pl.col.amount_variation.sign())
                                  .otherwise(pl.col.amount_variation) * pl.col.Alloc,
-                trade_cost_basis=pl.when(pl.col.typeAlloc == 'amount')
-                                 .then((pl.col.Alloc / pl.col.amount_variation).abs())
-                                 .otherwise(pl.col.Alloc) * pl.col.trade_cost_basis
             )
             .select('secType', 'secId', 'trade_cost_basis', 'amount_variation', 'port')
         )
@@ -395,6 +395,8 @@ df = pl.read_parquet(work_path + '/archivosvarios/dta_spy.parquet')
 
 dta_existing = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
 
+pos_equity.get().tail(10)
+fills.get()
 
 mtm_start_date = dt.datetime(2025, 1, 24, 9, 30)
 mtm_prueba_date = dt.datetime(2025, 1, 24, 15, 30)
@@ -414,7 +416,11 @@ event_dates = (
 t0 = time.time()
 pos_equity.update_tables(event_dates)
 t1 = time.time() - t0
-pos_equity.get()
+
+
+with pl.Config(tbl_rows=40):
+    print(pos_equity.get()['timestamp'].unique())
+
 event_dates
 
 (
