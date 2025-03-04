@@ -1,4 +1,5 @@
 import threading
+import time
 
 import numpy as np
 import pandas as pd
@@ -123,22 +124,35 @@ class ParquetHandler:
         :param timestamp_col: string name for the col
         :return: start timestamp in series format
         """
+        # event_timestamp_ = event_dates
+        if isinstance(event_timestamp_, pl.Series) and isinstance(event_timestamp_.dtype, pl.Datetime):
+            event_timestamp_ = event_timestamp_.min()
 
-        return (self.get()
+        return (pos_equity.get()
          .with_columns(secs=(pl.col(timestamp_col) - event_timestamp_).dt.total_seconds())
          .with_columns(pl.when(pl.col.secs >= 0).then(None).otherwise('secs').alias('secs'))
          .filter(pl.col.secs == pl.col.secs.max())[timestamp_col].unique())
 
-    def get_ts_to_update(self, event_timestamp, timestamp_col='timestamp'):
+    def get_ts_to_update(self,
+                         event_timestamp: pl.Series | dt.datetime,
+                         timestamp_col='timestamp'):
         """
         returns a series whose first ts won't be modified. subsequent ts are created/recalculated.
+        @param event_timestamp: series or datetime of events to be updated/added
+        @param timestamp_col: defaults to timestamp
+        @return:
         """
-        if isinstance(event_timestamp, pl.Series):
-            event_timestamp = event_timestamp[0]
+
+
+        pl.Series([dt.datetime(2023,1,1)]).dt.cast_time_unit(time_unit='ms')
+        if isinstance(event_timestamp, dt.datetime):
+            event_timestamp = pl.Series([event_timestamp, ])
+        if not isinstance(event_timestamp.dtype, pl.Datetime):
+            raise Exception(f'Series passed is {event_timestamp.dtype}, not Datetime')
 
         start_timestamp = self.get_start_ts(event_timestamp, timestamp_col)
         ts_to_update = self.get().filter(pl.col(timestamp_col) >= start_timestamp)[timestamp_col].unique()
-        ts_to_update.append(pl.Series([event_timestamp, ]).dt.cast_time_unit(time_unit='ms'))
+        ts_to_update.append(event_timestamp.dt.cast_time_unit(time_unit='ms'))
         # this is to remove a duplicate event ts due to the ts being one already present in the table
         ts_to_update = ts_to_update.unique()
         ts_to_update = ts_to_update.sort(descending=False)
@@ -204,17 +218,23 @@ class PositionHandler(ParquetHandler):
         self.cash = cash_handle
 
     def update_tables(self, event_ts):
-        event_ts_series = pl.Series([dt.datetime(2025, 1, 22, 10,0,1,3),
-                                     dt.datetime(2025, 1, 22, 10,0,1,4)])
-        event_ts_series.min()
+        """
+        a ver prueba
+        @param event_ts:
+        @return:
+        """
 
-        event_ts_series = dt.datetime(2025, 1, 22, 10,0,1,4)
-
+        # event_ts_series = pl.Series([dt.datetime(2025, 1, 22, 10,0,1,3),
+        #                              dt.datetime(2025, 1, 22, 10,0,1,4)])
+        #
+        # event_ts_series = dt.datetime(2025, 1, 22, 10,0,1,4)
+        # event_ts = event_ts_series
         input_qualification = ((isinstance(event_ts,
                                            pl.Series)
                                 and isinstance(event_ts.dtype,
                                                pl.Datetime))
                                or isinstance(event_ts, dt.datetime))
+
         if not input_qualification:
             raise Exception('input type not conforming')
 
@@ -223,9 +243,7 @@ class PositionHandler(ParquetHandler):
         else:
             start_timestamp = self.get_start_ts(event_ts)
 
-
-            pos_equity.get_start_ts(event_ts_series)
-        start_timestamp = self.get_start_ts(event_ts)
+        # start_timestamp = self.get_start_ts(event_ts)
 
         start_position = (
             self.get()
@@ -319,6 +337,7 @@ class PositionHandler(ParquetHandler):
         new_table_cash.write_parquet(self.cash.path)
 
 
+
 def update_blotter(new_row, overrides):
     path = work_path + '/synthetic_server_path/auto_port/blotter.parquet'
     df = get_blotter()
@@ -366,6 +385,7 @@ pos_cash.get()
 pos_equity.get()
 
 
+
 event_timestamp = dt.datetime(2025, 2, 22, 11,37,32)
 event_timestamp = dt.datetime(2025, 1, 22, 11,37,32)
 event_timestamp = dt.datetime(2025, 2, 23)
@@ -380,7 +400,7 @@ mtm_start_date = dt.datetime(2025, 1, 24, 9, 30)
 mtm_prueba_date = dt.datetime(2025, 1, 24, 15, 30)
 
 
-(
+event_dates = (
     dta_existing
     .filter(
         (pl.col('date') >= mtm_start_date)
@@ -388,8 +408,14 @@ mtm_prueba_date = dt.datetime(2025, 1, 24, 15, 30)
     )
     .unique(['date'])
     .sort(by='date', descending=False)
+    ['date']
 )
 
+t0 = time.time()
+pos_equity.update_tables(event_dates)
+t1 = time.time() - t0
+pos_equity.get()
+event_dates
 
 (
     pos_equity.get()
