@@ -1,6 +1,7 @@
 import threading
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import datetime as dt
 
@@ -67,6 +68,11 @@ from libs.config import work_path
 # # </editor-fold>
 
 
+def dt_to_series(datetime: dt.datetime,
+                 time_unit_str: str = 'ms'):
+    return pl.Series([datetime]).dt.cast_time_unit(time_unit_str)
+
+
 class ParquetHandler:
 
     def __init__(self, path):
@@ -86,6 +92,11 @@ class ParquetHandler:
         return self.get()[col_name].max()
 
     def addrow(self, new_row, overrides=None):
+        """
+        :param new_row: can be a dictionary or list of dicts
+        :param overrides: dictionary of overrides
+        :return: returns table with the new row
+        """
         if isinstance(new_row, dict):
             new_row = [new_row]
 
@@ -97,12 +108,20 @@ class ParquetHandler:
         return df
 
     def update(self, new_row, overrides=None):
+        """
+        :param new_row: can be a dict or list of dicsts
+        :param overrides: dict of overrides
+        :return: updates (writes) the table with the new row
+        """
         updated_df = self.addrow(new_row, overrides)
         updated_df.write_parquet(self.path)
 
-    def get_start_ts(self, event_timestamp_, timestamp_col='timestamp'):
+    def get_start_ts(self, event_timestamp_, timestamp_col='timestamp') -> pl.Series:
         """
         querys the table for the ts inmediatedly prceeding the event ts
+        :param event_timestamp_: timestamp or series timestamp in ms unit
+        :param timestamp_col: string name for the col
+        :return: start timestamp in series format
         """
 
         return (self.get()
@@ -110,10 +129,12 @@ class ParquetHandler:
          .with_columns(pl.when(pl.col.secs >= 0).then(None).otherwise('secs').alias('secs'))
          .filter(pl.col.secs == pl.col.secs.max())[timestamp_col].unique())
 
-    def get_ts_to_update(self, event_timestamp, timestamp_col = 'timestamp'):
+    def get_ts_to_update(self, event_timestamp, timestamp_col='timestamp'):
         """
         returns a series whose first ts won't be modified. subsequent ts are created/recalculated.
         """
+        if isinstance(event_timestamp, pl.Series):
+            event_timestamp = event_timestamp[0]
 
         start_timestamp = self.get_start_ts(event_timestamp, timestamp_col)
         ts_to_update = self.get().filter(pl.col(timestamp_col) >= start_timestamp)[timestamp_col].unique()
@@ -121,7 +142,6 @@ class ParquetHandler:
         # this is to remove a duplicate event ts due to the ts being one already present in the table
         ts_to_update = ts_to_update.unique()
         ts_to_update = ts_to_update.sort(descending=False)
-
 
         return ts_to_update
 
@@ -184,6 +204,27 @@ class PositionHandler(ParquetHandler):
         self.cash = cash_handle
 
     def update_tables(self, event_ts):
+        event_ts_series = pl.Series([dt.datetime(2025, 1, 22, 10,0,1,3),
+                                     dt.datetime(2025, 1, 22, 10,0,1,4)])
+        event_ts_series.min()
+
+        event_ts_series = dt.datetime(2025, 1, 22, 10,0,1,4)
+
+        input_qualification = ((isinstance(event_ts,
+                                           pl.Series)
+                                and isinstance(event_ts.dtype,
+                                               pl.Datetime))
+                               or isinstance(event_ts, dt.datetime))
+        if not input_qualification:
+            raise Exception('input type not conforming')
+
+        if isinstance(event_ts, pl.Series) and len(event_ts) > 1:
+            start_timestamp = self.get_start_ts(event_ts.min())
+        else:
+            start_timestamp = self.get_start_ts(event_ts)
+
+
+            pos_equity.get_start_ts(event_ts_series)
         start_timestamp = self.get_start_ts(event_ts)
 
         start_position = (
@@ -329,59 +370,41 @@ event_timestamp = dt.datetime(2025, 2, 22, 11,37,32)
 event_timestamp = dt.datetime(2025, 1, 22, 11,37,32)
 event_timestamp = dt.datetime(2025, 2, 23)
 
-import ib_async as ib
 
-ib_con = ib.IB()
-ib_con.connect(host='localhost',
-               port=4002,
-               clientId=1)
+df = pl.read_parquet(work_path + '/archivosvarios/dta_spy.parquet')
 
-pos_equity.get()['ticker'].unique()
-stock = ib.Contract(secType='STK',
-                    symbol='QQQ',
-                    exchange='SMART',
-                    currency='USD')
-
-stock = ib_con.qualifyContracts(stock)[0]
-
-dta = ib_con.reqHistoricalData(contract=stock,
-                         endDateTime='',
-                         durationStr='1 D',
-                         barSizeSetting='10 secs',
-                         useRTH=True,
-                         whatToShow='TRADES')
+dta_existing = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
 
 
-pl.from_pandas(ib.util.df(dta)).with_columns(pl.col('date')
-                                             .dt.replace_time_zone(None)
-                                             .dt.cast_time_unit('ms')).write_parquet(
-    work_path+ '/archivosvarios/dta_qqq.parquet')
+mtm_start_date = dt.datetime(2025, 1, 24, 9, 30)
+mtm_prueba_date = dt.datetime(2025, 1, 24, 15, 30)
 
 
-df = pl.read_parquet(work_path + '/archivosvarios/dta_qqq.parquet')
-
-pos_equity.update_tables(event_timestamp)
-pos_cash.get()
-
-
-# adding one day fwd
-
-latest_date = pos_equity.get_lastdate()
-ports = ['1', '2', '3']
-last_positions = (
-    pos_equity.get()
-    .filter(pl.col.port.is_in(ports)
-            & (pl.col.timestamp == latest_date))
+(
+    dta_existing
+    .filter(
+        (pl.col('date') >= mtm_start_date)
+        & (pl.col('date') <= mtm_prueba_date)
+    )
+    .unique(['date'])
+    .sort(by='date', descending=False)
 )
 
-fills.get()['order_itag']
 
-cols_fill_record = ['secId', 'secType', 'side', 'tradeQty', 'avgPrice', 'commission', 'order_itag', 'fill_timestamp']
+(
+    pos_equity.get()
+    .filter(
+        (pl.col('timestamp') >= mtm_start_date)
+        & (pl.col('timestamp') <= mtm_prueba_date)
+    )
+)
 
-fills.get()[cols_fill_record]
 
-blotter_log
-
-imp
+(
+    pos_equity.get()
+    .filter(pl.col('timestamp')==first_date_dta)
+    .select('timestamp', 'ticker')
+    .unique()
+)
 
 
