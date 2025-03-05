@@ -119,7 +119,7 @@ class ParquetHandler:
 
     def get_start_ts(self, event_timestamp_, timestamp_col='timestamp') -> pl.Series:
         """
-        querys the table for the ts inmediatedly prceeding the event ts
+        querys the table for the ts inmediatedly preceeding the event ts
         :param event_timestamp_: timestamp or series timestamp in ms unit
         :param timestamp_col: string name for the col
         :return: start timestamp in series format
@@ -142,8 +142,6 @@ class ParquetHandler:
         @param timestamp_col: defaults to timestamp
         @return:
         """
-
-
         pl.Series([dt.datetime(2023,1,1)]).dt.cast_time_unit(time_unit='ms')
         if isinstance(event_timestamp, dt.datetime):
             event_timestamp = pl.Series([event_timestamp, ])
@@ -302,8 +300,7 @@ class PositionHandler(ParquetHandler):
                     trade_cost_basis=pl.col.trade_cost_basis.fill_null(0))
                 .with_columns(
                     amount=pl.col.amount - pl.col.trade_cost_basis,
-                    cost_basis=pl.col.cost_basis - pl.col.trade_cost_basis
-                )
+                    cost_basis=pl.col.cost_basis - pl.col.trade_cost_basis)
                 .drop('trade_cost_basis')
             )
 
@@ -395,6 +392,7 @@ df = pl.read_parquet(work_path + '/archivosvarios/dta_spy.parquet')
 
 dta_existing = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
 
+dta_existing
 pos_equity.get().tail(10)
 fills.get()
 
@@ -417,6 +415,38 @@ t0 = time.time()
 pos_equity.update_tables(event_dates)
 t1 = time.time() - t0
 
+
+pos_equity.get()['timestamp'].unique()
+
+
+pos_equity.get().with_columns(trade_cost_basis=pl.lit(0.0))
+
+aea = (
+    pos_equity.get()
+    .with_columns(trade_cost_basis=pl.lit(0.0))
+    .join(other=dta_existing.rename({'date': 'timestamp'}),
+          on=['timestamp', 'ticker'],
+          coalesce=True,
+          how='left')
+    .with_columns(
+        pl.col('price').fill_null(pl.col('avgPrice').mean().over('ticker')))
+)
+
+
+pl.concat(items=[aea, pos_equity.get().insert_column(0, pl.lit(0.0).alias('price'))], how='vertical')
+
+(
+    pos_equity.get()
+    .filter(
+        (pl.col('timestamp').dt.second().cast(pl.Int64).mod(5)!=0)
+        # & ((pl.col('timestamp')- pl.duration(seconds=10)).dt.hour().cast(pl.Int64) != 22)
+    )
+    ['timestamp'].unique()
+)
+
+aea = pos_cash.get()['timestamp'].unique() == pos_equity.get()['timestamp'].unique()
+
+aea.sum()
 
 with pl.Config(tbl_rows=40):
     print(pos_equity.get()['timestamp'].unique())
