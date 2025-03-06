@@ -171,6 +171,21 @@ class FillHandler(ParquetHandler):
         :return: fills processed
         """
 
+        (
+            fills.get().filter(
+            pl.col('fill_timestamp').is_between(
+                lower_bound=dt.datetime(2025, 2, 19, 11, 37,32),
+                upper_bound=dt.datetime(2025, 2, 20, 16),
+                closed='right'))
+            .with_columns(
+                trade_cost_basis=pl.when(pl.col.side == 'BUY')
+                .then(pl.col.avgPrice * pl.col.tradeQty + pl.col.commission)
+                .otherwise(-pl.col.avgPrice * pl.col.tradeQty + pl.col.commission),
+                amount_variation=pl.when(pl.col.side == 'BUY')
+                .then(pl.col.tradeQty)
+                .otherwise(-pl.col.tradeQty))
+        )
+
         fills_filtered = (
             self.get()
             .filter((date_end >= pl.col.fill_timestamp)
@@ -394,7 +409,7 @@ dta_existing = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.par
 
 dta_existing
 pos_equity.get().tail(10)
-fills.get()
+fills.fills_processing(dt.datetime(2025,2,18,16), dt.datetime(2025,2,19,16))
 
 mtm_start_date = dt.datetime(2025, 1, 24, 9, 30)
 mtm_prueba_date = dt.datetime(2025, 1, 24, 15, 30)
