@@ -1,4 +1,3 @@
-from abc import ABC, abstractmethod
 import json
 import polars as pl
 import time
@@ -9,228 +8,142 @@ from libs.rabfile import *
 from libs.config import *
 import datetime as dt
 
+dict_of_equity_files = [
+    {'ticker': 'DTCR',
+     'path': work_path + '/archivosvarios/dta_dtcr.parquet'},
+    {'ticker': 'DTCR',
+     'path': work_path + '/archivosvarios/dta_dtcr250220.parquet'},
+    {'ticker': 'AAPL',
+     'path': work_path + '/archivosvarios/AAPL.csv'},
+    {'ticker': 'AAPL',
+     'path': work_path + '/archivosvarios/AAPL2.csv'},
+    {'ticker': 'QQQ',
+     'path': work_path + '/archivosvarios/QQQ.csv'},
+    {'ticker': 'QQQ',
+     'path': work_path + '/archivosvarios/QQQ2.csv'},
+    {'ticker': 'QQQ',
+     'path': work_path + '/archivosvarios/dta_qqq.parquet'},
+    {'ticker': 'QQQ',
+     'path': work_path + '/archivosvarios/dta_qqq250220.parquet'},
+    {'ticker': 'SPY',
+     'path': work_path + '/archivosvarios/dta_spy.parquet'},
+    {'ticker': 'SPY',
+     'path': work_path + '/archivosvarios/dta_spy250220.parquet'},
+    {'ticker': 'SPY',
+     'path': work_path + '/archivosvarios/dta_spy_250306_10.parquet'},
 
-class DataHandlerApp(ABC):
+]
+
+
+class MockIbApi:
     """
-    this class serves as an application that handles connections with
-    other data apis, stores the information and act as an API endpoint
-    for other app clients
-    """
-
-    @abstractmethod
-    def store_data(self):
-        """
-        stores data after a successful request to a data stream
-        :return:
-        """
-        pass
-
-    @abstractmethod
-    def update_data(self):
-        """
-        allows por the possibility of updating/replacing
-        data at a specific timestamp
-        :return:
-        """
-        pass
-
-    @abstractmethod
-    def client_datafeed(self):
-        """
-        client for sending data feed/APIs requests
-        and managing requests
-        :return:
-        """
-        pass
-
-    @abstractmethod
-    def client_strategies(self):
-        """
-        send alerts to strategies that there's new data
-        :return:
-        """
-        pass
-
-    @abstractmethod
-    def client_portfolio(self):
-        """
-        send alerts to the portfolio that there's new data
-        :return:
-        """
-        pass
-
-    @abstractmethod
-    def endpoint_strategies(self):
-        """
-        api endpoint for data requests from strategies
-        :return:
-        """
-        pass
-
-    @abstractmethod
-    def endpoint_portfolio(self):
-        """
-        api endpoint for data requests from portfolio
-        :return:
-        """
-        pass
-
-
-class DataAPICSV:
-    """
-    replicates a live daily trading session
+    specificity triuhmps greedy generality
     """
 
-    def __init__(self,
-                 csv_info: dict):
-        # pulse: int
+    def __init__(self, stk_dict):
 
-        # checking input dictionary is compliant
-        field_checker = {'equity': ['ticker', 'path', 'col_names']}
+        self.stk_df = self._read_stk(stk_dict)
 
-        for tipo_data in csv_info.keys():
+    @staticmethod
+    def _read_stk(stk_dict):
 
-            checker = [
-                all([True if campo in field_checker[tipo_data]
-                     else False
-                     for campo in csv_file])
-                for csv_file in csv_info[tipo_data]]
+        stacked_tables = []
+        for entry in stk_dict:
 
-            if not all(checker):
-                faulty_csv = [
-                    dic['ticker']
-                    for dic, ok in zip(csv_info[tipo_data], checker)
-                    if not ok
-                ]
-                raise Exception(f'''
-                    Missing fields in data type {tipo_data}\n
-                    security: {faulty_csv}
-                    ''')
+            if entry['ticker'].lower() not in entry['path'].lower():
+                print(f"ticker {entry['ticker']} is not in path:")
+                print(f"{entry['path']}")
+                raise Exception
 
-        self._csv_info = csv_info
-
-        logger.debug('Input dictionary has the necessary fields')
-
-        # data is retrieved from according to given parameters
-
-        self.consumable_data = {}
-        self.time_stamps = []
-        for tipo_data, csv_files in self._csv_info.items():
-
-            items_list = []
-            for file_dict in csv_files:
-
-                if '.csv' in file_dict['path']:
-                    df_temp = (pl.read_csv(file_dict['path'])
-                    .with_columns(date=pl.col('date')
-                    .str.to_datetime(
-                        format='%Y-%m-%d %H:%M:%S%z',
-                        time_zone='America/New_York',
-                        time_unit='ms')
-                        .dt.replace_time_zone(None)))
-
-                elif '.parquet' in file_dict['path']:
-                    df_temp = (
-                        pl.read_parquet(file_dict['path'])
-                        .with_columns(
-                            date=pl.col.date.dt.replace_time_zone(None)))
-
-                items_list.append(
-                    df_temp
-                    .rename(mapping={
-                        col_name_csv: col_name_db
-                        for col_name_db, col_name_csv
-                        in file_dict['col_names'].items()})
-                    .select(file_dict['col_names'].keys())
-                    .with_columns(ticker=pl.lit(file_dict['ticker']))
+            if 'parquet' in entry['path']:
+                df_temp = (
+                    pl.read_parquet(entry['path'])
+                    .with_columns(
+                        date=pl.col('date')
+                        .dt.replace_time_zone(None)
+                        .dt.cast_time_unit('ms'),
+                        ticker=pl.lit(entry['ticker']))
                 )
 
-            self.consumable_data[tipo_data] = pl.concat(
-                items=items_list, how='vertical', rechunk=True)
+            elif 'csv' in entry['path']:
+                df_temp = (
+                    pl.read_csv(entry['path'])
+                    .with_columns(
+                        date=pl.col('date').str.to_datetime(
+                            format='%Y-%m-%d %H:%M:%S%z',
+                            time_zone='America/New_York',
+                            time_unit='ms')
+                        .dt.replace_time_zone(None),
+                        ticker=pl.lit(entry['ticker']))
+                )
 
-            self.time_stamps.append(
-                self.consumable_data[tipo_data]['date'].unique()
-            )
+            else:
+                print('extension not recognized for file:')
+                print(f"{entry['path']}")
+                raise Exception
 
-        self.time_stamps = (
-            pl.concat(
-                items=self.time_stamps,
-                rechunk=True
-            )
-            .unique()
-            .sort(descending=False)
+            stacked_tables.append(df_temp)
+
+        df_stacked = pl.concat(items=stacked_tables,
+                               how='vertical', rechunk=True)
+
+        df_stacked = df_stacked.unique(subset=['date', 'ticker'])
+
+        return df_stacked
+
+    def fake_connection(self, filtro, pulse):
+        # filtro = (pl.col('date') >= dt.datetime(2025,2,28)) & (pl.col('date') <= dt.datetime(2025, 3, 1))
+        df_filtered = (
+            self.stk_df
+            .filter(filtro)
         )
 
-        logger.info('finished initialization')
-        # self.consumable_data = None
-        # self.time_stamps = None
-        # self.client_datafeed(pulse)
-
-        print('CSV Feed connection is ready')
-
-    def client_datafeed(self,
-                        pulse: int = 1,
-                        data_type_to_consume: list = None,
-                        ):
-
-        # Create Connection
-        # from libs.rabfile import RabbitConCSV
-
-        # rabcon = RabbitConCSV()
-
-        data_type_to_consume = data_type_to_consume or self.consumable_data.keys()
+        timestamps_filtered = df_filtered['date'].unique().sort(descending=False)
 
         def synthetic_stream():
 
-            for ts in self.time_stamps:
-
-                sent_data = {}
-                for tipo_data in data_type_to_consume:
-                    sent_data[tipo_data] = (
-                        self.consumable_data[tipo_data]
-                        .filter(pl.col('date') == ts)
-                    )
-
-                    # rabcon.produce(
-                    #     body=f'''
-                    #     {ts}___{tipo_data}
-                    #                 ''',
-                    #     routing_key=f'data_csv.{tipo_data}'
-                    # )
-
-                yield sent_data
-                # logger.debug(f"sent_data {ts.strftime('%c')}")
+            for t in timestamps_filtered:
+                df_out = (
+                    df_filtered
+                    .filter(pl.col.date == t)
+                )
+                yield df_out
 
                 time.sleep(pulse)
 
         return synthetic_stream()
 
 
-class DataHandlerPrimer:
+mockib_instance = MockIbApi(dict_of_equity_files)
+
+
+aea = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
+
+
+class BasicDataHandler:
 
     def __init__(self,
-                 data_base_connections: dict):
+                 table_info: dict):
         # <editor-fold desc="initializing the connection to the database">
-        # assume the connection is just a path where to store the parquets
-        # it will check if the path exists
-
         from os import path as os_path
 
-        self.db_connection = {}
-        supported_securities = ['equity']
+        self.db_path = {}
+        supported_tables = ['equity']
 
-        for security, connection in data_base_connections.items():
+        for tbl, tbl_path in table_info.items():
 
-            if security in supported_securities:
-                if os_path.exists(connection):
-                    self.db_connection[security] = connection
+            if tbl in supported_tables:
+                if os_path.exists(tbl_path):
+                    self.db_connection[tbl] = tbl_path
                 else:
-                    logger.error(f'data base path not found for security: {security}')
-                    raise Exception(f'data base path not found for security: {security}')
+                    logger.error(f'data base path not found for table: {tbl}')
+                    raise Exception(f'data base path not found for table: {tbl}')
             else:
-                logger.error(f"Security: '{security}' not supported")
-                raise Exception(f"Security: '{security}' not supported")
+                logger.error(f"Table: '{tbl}' not supported")
+                raise Exception(f"Table: '{tbl}' not supported")
         # </editor-fold>
+
+        self.feeds = {}
 
         # <editor-fold desc="ways to shut down stuff">
         self.shutdown_event = {}
@@ -248,23 +161,34 @@ class DataHandlerPrimer:
         self.start_db_maintainer()
         self.start_db_rpc_api()
 
+    def connect_ib_feed(self, generator, output_queue):
+
+        self.feeds['ib'] = FakeStreamer(generator, output_queue)
+
+
+class FakeStreamer:
+
+    def __init__(self, generator, output_queue):
+
+        self.master_queue = output_queue
+        self.connect_csv_endpoint(generator)
+
     def connect_csv_endpoint(self,
-                             securities: Iterable,
                              generator: Generator):
 
-        self.shutdown_event['csv_endpoint'] = threading.Event()
-        threading.Thread(target=self._setup_connect_csv_endpoint,
-                         args=(securities,
-                               generator,)).start()
+        self.shutdown_event = threading.Event()
+        self.thread = threading.Thread(
+            target=self._setup_connect_csv_endpoint,
+            args=(generator, ))
+        self.thread.start()
 
     def close_csv_endpoint(self):
-        if self.shutdown_event['csv_endpoint'].is_set():
+        if self.shutdown_event.is_set():
             logger.info('csv_endpoint was closed already')
         else:
-            self.shutdown_event['csv_endpoint'].set()
+            self.shutdown_event.set()
 
     def _setup_connect_csv_endpoint(self,
-                                    securities: Iterable,
                                     generator: Generator):
         # import pyarrow.parquet as pq
 
@@ -273,31 +197,39 @@ class DataHandlerPrimer:
         logger.debug('started streaming from csv endpoint')
 
         for beat in generator:
-            for security in securities:
-                self.queue_db_handler.put(
-                    {'data': beat[security],
-                     'info': security}
-                )
-                time_stamp = beat[security]['date'][0]
-                logger.debug(f"data streamed from csv_api {time_stamp}")
+            self.master_queue.put(
+                {'data': beat, })
+            time_stamp = beat['date'][0]
+            logger.debug(f"data streamed from csv_api {time_stamp}")
 
-            if self.shutdown_event['csv_endpoint'].is_set():
+            if self.shutdown_event.is_set():
                 print('csv connection closed')
                 logger.info('csv connection closed')
                 return
 
-    def start_db_maintainer(self):
-        self.shutdown_event['db_maintainer'] = threading.Event()
 
-        threading.Thread(
+
+class DBMaintainer:
+
+    def __init__(self):
+        self.start_db_maintainer()
+
+
+    def start_db_maintainer(self):
+        self.shutdown_event = threading.Event()
+
+        self.shutdown_event = threading.Event()
+
+        self.thread = threading.Thread(
             target=self._setup_db_maintainer,
-            args=()).start()
+            args=())
+        self.thread.start()
 
     def stop_db_maintainer(self):
-        if self.shutdown_event['db_maintainer'].is_set():
+        if self.shutdown_event.is_set():
             logger.info('db maintainer was stopped already')
         else:
-            self.shutdown_event['db_maintainer'].set()
+            self.shutdown_event.set()
 
     def _setup_db_maintainer(self):
 

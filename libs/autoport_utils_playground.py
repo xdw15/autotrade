@@ -213,7 +213,6 @@ class FillHandler(ParquetHandler):
         return fills_filtered
 
 
-
 class PositionHandler:
 
     def __init__(self, positions_paths, fill_handle, prices_handler):

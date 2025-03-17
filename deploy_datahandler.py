@@ -4,8 +4,8 @@ from libs.config import *
 from libs.data_handler import *
 import logging
 
-looger = logging.getLogger('autotrade')
-looger.setLevel(logging.DEBUG)
+logger = logging.getLogger('autotrade')
+logger.setLevel(logging.DEBUG)
 log_FileHandler = logging.FileHandler(
     filename= work_path
     + f'/{__name__}_prueba_data_handler.log',
@@ -18,12 +18,12 @@ log_Formatter = logging.Formatter(
     style='{',
     validate=True
 )
-looger.addHandler(log_FileHandler)
+logger.addHandler(log_FileHandler)
 log_FileHandler.setFormatter(log_Formatter)
 
 log_stream_handler = logging.StreamHandler()
 log_stream_handler.setFormatter(log_Formatter)
-looger.addHandler(log_stream_handler)
+logger.addHandler(log_stream_handler)
 
 csvinfo = {
 
@@ -62,3 +62,26 @@ db_handler_app.connect_csv_endpoint(securities=['equity'],
 
 #aea = pl.read_parquet(db_connections['equity'])
 
+
+# ----------- scratch
+
+import ib_async as ib
+
+ib_con = ib.IB()
+ib_con.connect(port=4001, clientId=2)
+
+ib_con.positions()
+
+contract = ib.Contract(secType='STK', symbol='QQQ', exchange='SMART', currency='USD')
+contract = ib_con.qualifyContracts(contract)[0]
+ib_con.reqHistoricalData()
+live_bars = ib_con.reqRealTimeBars(contract=contract, barSize=5, whatToShow='TRADES', useRTH=True)
+
+def on_update(a, b):
+    print(ib.util.df(a))
+    print(b)
+
+live_bars.updateEvent += on_update
+
+ib_con.updateEvent()
+ib_con.run()
