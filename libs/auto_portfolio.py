@@ -103,6 +103,22 @@ class ToyPortfolio:
                  initial_holdings: dict,
                  time_stamp: str,
                  price_ccy: str = None):
+        """
+        the class is a system that manages the updating
+        of the holdings (securities and cash) and calculations (pnl, mtm, etc) tables
+        in the context of subapplications generating live events.
+        the existing subapps are
+        - db client: receives data events to update the valuations
+        - autoexec client: receives fill events to update positions. and sends orders received
+        - order client: receives orders from other applications to which the subaplication is subscribed
+
+        the class portfolio should be able to invoke the same tool that would update the table
+        in a non-event fashion. i.e., through manually calling a script.
+
+        :param initial_holdings:
+        :param time_stamp:
+        :param price_ccy:
+        """
 
         time_stamp = dt.datetime.strptime(time_stamp, '%Y%m%d%H%M%S')
 
@@ -114,8 +130,8 @@ class ToyPortfolio:
 
         self.price_ccy = price_ccy or 'USD'
 
-        self.shutdown_event = {}
-        self.thread_tracker = {}
+        self.shutdown_event = {} # evaluate the purpose
+        self.thread_tracker = {} # create an individual dictionary for tracking the threads of each sub application
         self.rab_connections = {}
         self.order_tracker = {}
         self.order_counter = 0
@@ -128,7 +144,7 @@ class ToyPortfolio:
         # </editor-fold>
 
         # <editor-fold desc="instance queue container">
-        self.queues = {}
+        self.event_queue = {}
         # </editor-fold>
 
         self._start_risk_manager()
@@ -240,7 +256,7 @@ class ToyPortfolio:
 
     def update_system(self):
 
-        data_event = self.queues['DH_endpoint'].get()
+        data_event = self.event_queue['DH_endpoint'].get()
 
         self._update_mtm(data_event['data'])
 
@@ -299,7 +315,7 @@ class ToyPortfolio:
                 continue
 
         logger.info('DH_endpoint started')
-        self.queues['DH_endpoint'] = queue.Queue()
+        self.event_queue['DH_endpoint'] = queue.Queue()
 
     def close_db_endpoint(self):
 
@@ -349,6 +365,7 @@ class ToyPortfolio:
             msg_security_type = msg['security']['type']
             msg_securities = body['security']['tickers']
             msg_time_stamp = dt.datetime.strptime(body['time_stamp'], '%Y%m%d%H%M%S')
+
             positions_last = (
                 self.positions[msg_security_type]
                 .filter(pl.col('date') == pl.col('date').max())
@@ -379,7 +396,7 @@ class ToyPortfolio:
                 .collect()
             )
 
-            self.queues['DH_endpoint'].put({'data': df,
+            self.event_queue['DH_endpoint'].put({'data': df,
                                             'time_stamp': msg_time_stamp})
 
         rab_con.channel.basic_consume(queue=queue_declare,
@@ -430,14 +447,14 @@ class ToyPortfolio:
     def _start_autoexecution_rpc_client(self):
 
         connection_event = threading.Event()
-        t = threading.Event(target=self._setup_autoexecution_rpc_client,
+        t = threading.Thread(target=self._setup_autoexecution_rpc_client,
                             args=(connection_event, ))
 
         self.thread_tracker['AutoExecution_rpc'] = t
 
         t.start()
 
-        self.queues['fill_confirmations'] = queue.Queue()
+        self.event_queue['fill_confirmations'] = queue.Queue()
 
         with threading.Lock():
             while not connection_event.is_set():
@@ -493,7 +510,7 @@ class ToyPortfolio:
                 table.update(new_row=new_row,
                              overrides=overrides)
 
-            self.queues['fill_confirmations'].put(body['order_itag'])
+            self.event_queue['fill_confirmations'].put(body['order_itag'])
 
 
         _connection_event.set()

@@ -69,9 +69,9 @@ from libs.config import work_path
 # # </editor-fold>
 
 
-def dt_to_series(datetime: dt.datetime,
-                 time_unit_str: str = 'ms'):
-    return pl.Series([datetime]).dt.cast_time_unit(time_unit_str)
+# def dt_to_series(datetime: dt.datetime,
+#                  time_unit_str: str = 'ms'):
+#     return pl.Series([datetime]).dt.cast_time_unit(time_unit_str)
 
 
 class ParquetHandler:
@@ -82,8 +82,12 @@ class ParquetHandler:
         sc = pl.read_parquet_schema(path)
         del sc
 
-    def get(self):
-        df = pl.scan_parquet(self.path).collect()
+    def get(self, filtro=None):
+
+        if filtro is None:
+            df = pl.scan_parquet(self.path).collect()
+        else:
+            df = pl.scan_parquet(self.path).filter(filtro).collect()
         return df
 
     def get_lastdate(self, col_name='timestamp'):
@@ -137,7 +141,7 @@ class ParquetHandler:
                          event_timestamp: pl.Series | dt.datetime,
                          timestamp_col='timestamp'):
         """
-        returns a series whose first ts won't be modified. subsequent ts are created/recalculated.
+       returns a series whose first ts won't be modified. subsequent ts are created/recalculated.
         @param event_timestamp: series or datetime of events to be updated/added
         @param timestamp_col: defaults to timestamp
         @return:
@@ -202,10 +206,12 @@ class FillHandler(ParquetHandler):
                                  .then(pl.col.amount_variation.sign())
                                  .otherwise(pl.col.amount_variation) * pl.col.Alloc,
             )
-            .select('secType', 'secId', 'trade_cost_basis', 'amount_variation', 'port')
+            .with_columns(trade_avgPrice=pl.col('trade_cost_basis') / pl.col('amount_variation'))
+            .select('secType', 'secId', 'trade_cost_basis', 'amount_variation', 'port', 'trade_avgPrice')
         )
 
         return fills_filtered
+
 
 
 class PositionHandler:
@@ -239,6 +245,8 @@ class PositionHandler:
         if not input_qualification:
             raise Exception('input type not conforming')
 
+
+        # start timestamp is obtained from cash because cash table can never be empty
         if isinstance(event_ts, pl.Series) and len(event_ts) > 1:
             start_timestamp = self.cash.get_start_ts(event_ts.min())
         else:
@@ -259,6 +267,13 @@ class PositionHandler:
 
         ts_to_update = self.cash.get_ts_to_update(event_ts)
 
+        p_equity_temp = (
+            self.p_equity
+            .get((pl.col('date')>= ts_to_update[0])
+                    & (pl.col('date') <= ts_to_update[-1]) )
+            .rename({'date': 'timestamp'})
+            .with_columns(timestamp=pl.col('timestamp').dt.cast_time_unit('us'))
+        )
         agg_position = []
         agg_position_cash = []
         for ts_index in range(1, len(ts_to_update)):
@@ -268,29 +283,65 @@ class PositionHandler:
                 date_end=ts_to_update[ts_index])
 
             end_position = (
-                start_position  # .filter(pl.col('port')=='xd')
-                .drop('trade_cost_basis')
+                start_position#.filter(pl.col('port')=='xd')
+                # drop zero positions
+                .filter(pl.col.amount != 0.0)
+                .rename({'mtm': 'mtm_prev',
+                         'amount': 'amount_prev'})
+                .drop('trade_cost_basis', 'price', 'price_source', 'pnl', 'ret')
                 .join(other=(fills_filtered  # .filter(pl.col.port=='33333')
                              .rename({'secId': 'ticker'})),
                       on=['ticker', 'port'],
                       how='full',
                       coalesce=True)
-                .with_columns(timestamp=ts_to_update[ts_index],
-                              mtm=None)
-                .with_columns([pl.col(col).fill_null(0)
-                               for col in ['amount',
+                .with_columns(timestamp=ts_to_update[ts_index])
+                             # mtm=None)
+                .with_columns([pl.col(col).fill_null(0.0)
+                               for col in ['amount_prev',
                                            'avgPrice',
                                            'trade_cost_basis',
-                                           'amount_variation']])
+                                           'amount_variation',
+                                           'mtm_prev']])
                 # se hace el calculo aca
                 .with_columns(
-                    avgPrice=(pl.col.amount * pl.col.avgPrice
-                              + pl.col.trade_cost_basis) / (pl.col.amount + pl.col.amount_variation),
-                    amount=pl.col.amount + pl.col.amount_variation
+                    avgPrice=(pl.col.amount_prev * pl.col.avgPrice
+                              + pl.col.trade_cost_basis) / (pl.col.amount_prev + pl.col.amount_variation),
+                    amount=pl.col.amount_prev + pl.col.amount_variation
                 )
+                .with_columns(
+                    avgPrice=pl.when(pl.col('avgPrice').is_infinite())
+                    .then(pl.lit(0)).otherwise(pl.col('avgPrice'))
+                )
+                # la parte de precios y pnl aca
+                .join(other=p_equity_temp,
+                      on=['timestamp', 'ticker'],
+                      how='left',
+                      coalesce=True)
+                .with_columns(
+                    price=pl.when(pl.col('price').is_null())
+                    .then(pl.when(~pl.col('trade_avgPrice').is_null())
+                          .then(pl.col('trade_avgPrice'))
+                          .otherwise(pl.col('mtm_prev')
+                                     / pl.col('amount_prev')))
+                    .otherwise(pl.col('price')),
+                    price_source=pl.when(pl.col('price').is_null())
+                    .then(pl.when(~pl.col('trade_avgPrice').is_null())
+                          .then(pl.lit('trade'))
+                          .otherwise(pl.lit('last_mtm')))
+                    .otherwise(pl.lit('vector'))
+                )
+                .with_columns(
+                    mtm=pl.col('price') * pl.col('amount'),
+                    pnl=pl.col('price') * pl.col('amount') - pl.col('trade_cost_basis') - pl.col('mtm_prev')
+                )
+                .with_columns(ret=pl.when(pl.col('amount_prev') == 0.0 )
+                              .then(pl.col('mtm')/pl.col('trade_cost_basis')-1.0)
+                              .otherwise(pl.col.pnl/pl.col.mtm_prev))
+
                 .select(start_position.columns)
-                # .drop('trade_cost_basis', 'amount_variation')
             )
+
+
 
             end_position_cash = (
                 start_position_cash
@@ -333,21 +384,21 @@ class PositionHandler:
 
 
 
-        self.p_equity
-
-        pos.equity.get_ts_to_update(p)
-        (pos.equity.get()
-         .join(other=(price_equity.get()
-                      .rename({'date': 'timestamp'})
-                      .select(['timestamp', 'ticker', 'price'])),
-               on=['timestamp', 'ticker'],
-               how='left',
-               coalesce=True)
-         .with_columns(mtm_new=pl.col('avgPrice')*pl.col('price'))
-         pl.col
-         )
-        pos.equity.get()
-        price_equity.get()
+        # self.p_equity
+        #
+        # pos.equity.get_ts_to_update(p)
+        # (pos.equity.get()
+        #  .join(other=(price_equity.get()
+        #               .rename({'date': 'timestamp'})
+        #               .select(['timestamp', 'ticker', 'price'])),
+        #        on=['timestamp', 'ticker'],
+        #        how='left',
+        #        coalesce=True)
+        #  .with_columns(mtm_new=pl.col('avgPrice')*pl.col('price'))
+        #  pl.col
+        #  )
+        # pos.equity.get()
+        # price_equity.get()
 
         new_table_cash = (
             pl.concat(items=[(self.cash.get()
@@ -361,49 +412,41 @@ class PositionHandler:
 
 
 
-def update_blotter(new_row, overrides):
-    path = work_path + '/synthetic_server_path/auto_port/blotter.parquet'
-    df = get_blotter()
-    updated_df = pl_addrow(df, new_row, overrides=overrides)
-    updated_df.write_parquet(path)
-
-
-def get_blotter():
-    path = work_path + '/synthetic_server_path/auto_port/blotter.parquet'
-    df = pl.read_parquet(path)
-    return df
-
-
-def pl_addrow(df, new_row, overrides=None):
-    df_new_row = pl.DataFrame(data=[new_row],
-                              schema_overrides=overrides)
-
-    df = pl.concat(items=[df, df_new_row], how='vertical', rechunk=True)
-    return df
-
-
-p0 = {'equity': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet'),
-      'cash': pl.read_parquet_schema(work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet')}
-
 pos_cash = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet')
-fills = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet')
-
 
 orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet')
 blotter = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter.parquet')
 blotter_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_log.parquet')
 blotter_alloc = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_alloc.parquet')
 fills = FillHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet', blotter_alloc)
-price_equity = ParquetHandler(work_path + '/synthetic_server_path/us_equity.parquet')
-pos = PositionHandler({'equity': work_path + '/synthetic_server_path/auto_port/holdings/equity.parquet',
-                       'cash': work_path + '/synthetic_server_path/auto_port/holdings/cash.parquet'},
+p_equity = ParquetHandler(work_path + '/synthetic_server_path/us_equity.parquet')
+pos = PositionHandler({'equity': work_path + '/synthetic_server_path/auto_port/holdings/mock_equity.parquet',
+                       'cash': work_path + '/synthetic_server_path/auto_port/holdings/mock_cash.parquet'},
                       fill_handle=fills,
-                      prices_handler=price_equity)
+                      prices_handler=p_equity)
+
+mock_equity_holdings = pl.read_parquet(work_path + '/synthetic_server_path/auto_port/holdings/mock_equity.parquet')
+
+mock_cash[:3].write_parquet(pos.cash.path)
 
 
+mock_cash = pl.read_parquet(work_path + '/synthetic_server_path/auto_port/holdings/mock_cash.parquet')
+
+with pl.Config(tbl_cols=11):
+    print(mock_equity_holdings[:2].with_columns(
+    amount=pl.col.amount * -1,
+    avgPrice=pl.col.avgPrice * 0.7,
+    price=pl.col.avgPrice * 0.7,
+    timestamp=pl.col.timestamp - pl.duration(days=1)
+).with_columns(
+    trade_cost_basis=pl.col('avgPrice') * pl.col('amount'),
+    mtm=pl.col.price * pl.col.amount
+).write_parquet(pos.equity.path)
+    )
 
 
-
+with pl.Config(tbl_cols=11):
+    print(mock_equity_holdings[:5].filter(pl.col.amount != 0.0))
 
 blotter.get()
 blotter_log.get()
@@ -415,6 +458,7 @@ pos_cash.get()
 
 pos.cash.get()
 pos.equity.get()
+
 pos_equityget().with_columns(trade_cost_basis=pl.lit(0.0))
 
 
@@ -430,16 +474,27 @@ dta_existing = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.par
 
 dta_existing.filter()
 
+p_equity.get()['date'].unique().sort()
 
-pos_equity.get().tail(10)
+pos.equity.get()[:10]
+pos.equity.get()
+
+
+blotter.get()
+fills.fills_processing(dt.datetime(2025, 2, 19), dt.datetime(2025,2,19,12))
+
+
 fills.fills_processing(dt.datetime(2025,2,18,16), dt.datetime(2025,2,19,16))
 
-mtm_start_date = dt.datetime(2025, 1, 24, 9, 30)
-mtm_prueba_date = dt.datetime(2025, 1, 24, 15, 30)
+mtm_start_date = dt.datetime(2025, 2, 20, 9, 30)
+mtm_prueba_date = dt.datetime(2025, 2, 20, 16)
+
 
 
 event_dates = (
-    dta_existing
+    # pos.equity.get().rename({'timestamp': 'date'})
+    p_equity.get()
+#    dta_existing
     .filter(
         (pl.col('date') >= mtm_start_date)
         & (pl.col('date') <= mtm_prueba_date)
@@ -449,14 +504,29 @@ event_dates = (
     ['date']
 )
 
-pos_equity.get()
-pos_cash.get()
+pos.cash.get_start_ts(dt.datetime(2025,1,22))
+pos.cash.get_ts_to_update(event_dates)
 
+fills.get()
 
+with pl.Config(tbl_cols=11):
+    print(pos.equity.get())
+
+    print(
+        pos.equity.get()
+        # .filter((pl.col('port')=='1') & (pl.col('timestamp').dt.date() == dt.date(2025,1 ,24)) )
+        .filter(pl.col('ticker')=='DTCR')
+        .sort('timestamp', descending=False)
+        # ['ret'].sum()
+        # .filter(pl.col.price_source!='last_mtm')
+        # .filter(pl.col.price_source == 'trade')
+        # .filter(pl.col.pnl < 0)
+    )
+
+pos.cash.get_ts_to_update(dt.datetime(2025,1,22))
 t0 = time.time()
-pos_equity.update_tables(dt.datetime(2025,1,22))
+pos.update_tables(event_dates)
 t1 = time.time() - t0
-
 
 pos_equity.get()['timestamp'].unique()
 

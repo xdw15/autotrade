@@ -7,6 +7,7 @@ from typing import Iterable, Generator
 import queue
 from libs.rabfile import *
 from libs.config import *
+import datetime as dt
 
 
 class DataHandlerApp(ABC):
@@ -120,38 +121,37 @@ class DataAPICSV:
         self.consumable_data = {}
         self.time_stamps = []
         for tipo_data, csv_files in self._csv_info.items():
-            self.consumable_data[tipo_data] = (
-                pl.concat(
-                    items=[
-                        (
-                            pl.read_csv(file_dict['path'])
-                            .rename(
-                                mapping={
-                                    col_name_csv: col_name_db
-                                    for col_name_db, col_name_csv
-                                    in file_dict['col_names'].items()
-                                }
-                            )
-                            .select(file_dict['col_names'].keys())
-                            .with_columns(
-                                pl.lit(file_dict['ticker']).alias('ticker')
-                            )
-                        )
-                        for file_dict in csv_files
-                    ],
-                    how='vertical',
-                    rechunk=True
-                )
-                .with_columns(
-                    pl.col('date').str.to_datetime(
+
+            items_list = []
+            for file_dict in csv_files:
+
+                if '.csv' in file_dict['path']:
+                    df_temp = (pl.read_csv(file_dict['path'])
+                    .with_columns(date=pl.col('date')
+                    .str.to_datetime(
                         format='%Y-%m-%d %H:%M:%S%z',
                         time_zone='America/New_York',
-                        time_unit='ms'
-                    )
-                    .dt.replace_time_zone(None)
-                    .alias('date')
+                        time_unit='ms')
+                        .dt.replace_time_zone(None)))
+
+                elif '.parquet' in file_dict['path']:
+                    df_temp = (
+                        pl.read_parquet(file_dict['path'])
+                        .with_columns(
+                            date=pl.col.date.dt.replace_time_zone(None)))
+
+                items_list.append(
+                    df_temp
+                    .rename(mapping={
+                        col_name_csv: col_name_db
+                        for col_name_db, col_name_csv
+                        in file_dict['col_names'].items()})
+                    .select(file_dict['col_names'].keys())
+                    .with_columns(ticker=pl.lit(file_dict['ticker']))
                 )
-            )
+
+            self.consumable_data[tipo_data] = pl.concat(
+                items=items_list, how='vertical',rechunk=True)
 
             self.time_stamps.append(
                 self.consumable_data[tipo_data]['date'].unique()
@@ -193,9 +193,7 @@ class DataAPICSV:
                 for tipo_data in data_type_to_consume:
                     sent_data[tipo_data] = (
                         self.consumable_data[tipo_data]
-                        .filter(
-                            pl.col('date') == ts
-                        )
+                        .filter(pl.col('date') == ts)
                     )
 
                     # rabcon.produce(
@@ -252,6 +250,9 @@ class DataHandlerPrimer:
         self.thread_tracker = {}
         # </editor-fold>
 
+        self.start_db_maintainer()
+        self.start_db_rpc_api()
+
     def connect_csv_endpoint(self,
                              securities: Iterable,
                              generator: Generator):
@@ -259,9 +260,7 @@ class DataHandlerPrimer:
         self.shutdown_event['csv_endpoint'] = threading.Event()
         threading.Thread(target=self._setup_connect_csv_endpoint,
                          args=(securities,
-                               generator,
-                               )
-                         ).start()
+                               generator,)).start()
 
     def close_csv_endpoint(self):
         if self.shutdown_event['csv_endpoint'].is_set():
@@ -297,8 +296,7 @@ class DataHandlerPrimer:
 
         threading.Thread(
             target=self._setup_db_maintainer,
-            args=()
-        ).start()
+            args=()).start()
 
     def stop_db_maintainer(self):
         if self.shutdown_event['db_maintainer'].is_set():
@@ -326,11 +324,14 @@ class DataHandlerPrimer:
             try:
                 queue_item = self.queue_db_handler.get(block=False)
             except queue.Empty:
-                rab_con.connection.sleep(5)
+                rab_con.connection.sleep(1)
                 continue
 
             security = queue_item['info']
-            data = queue_item['data']
+            data = (
+                queue_item['data']
+                .with_columns(timestamp_write=dt.datetime.now())
+            )
 
             temp_connection = pl.read_parquet(
                 self.db_connection[security]
