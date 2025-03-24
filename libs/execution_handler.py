@@ -112,44 +112,53 @@ class AutoExecution:
         # self._ib_placed_orders = {}
         self._connect_db_csv()
 
-    def _start_fill_publisher(self):
 
-        start_event = threading.Event()
-        t = threading.Thread(target=self._setup_fill_publisher, args=(start_event,))
-        t.start()
-        self._thread_tracker['fill_publisher'] = t
+    class FillPublisher:
 
-        with threading.Lock():
-            while not start_event.is_set():
-                continue
+        def __init__(self):
+            pass
 
-        self.flags['hb_fill_publisher'] = True
-        t2 = threading.Thread(target=self._heartbeat_rabcon,
-                              args=(self.rab_connections['fill_publisher'],
-                                    self.flags['hb_fill_publisher'],
-                                    'fill_publisher', ))
-        t2.start()
-        self._thread_tracker['hb_fill_publisher'] = t2
+        def _start_fill_publisher(self):
 
-        # 0ta 0ara 0r9bar
-        # para probar otra vez
-        logger.info('fill_publisher started')
+            start_event = threading.Event()
+            t = threading.Thread(
+                target=self._setup_fill_publisher,
+                args=(start_event,))
 
-    @staticmethod
-    def _heartbeat_rabcon(con, flag, name, time_limit=1):
+            t.start()
+            self._thread_tracker['fill_publisher'] = t
 
-        logger.debug(f"{name} heartbeat started")
-        while flag:
-            con.connection.process_data_events(time_limit=time_limit)
-        logger.debug(f"{name} heartbeat finished")
+            with threading.Lock():
+                while not start_event.is_set():
+                    continue
 
-    def _setup_fill_publisher(self, _start_event):
+            self.flags['hb_fill_publisher'] = True
+            t2 = threading.Thread(target=self._heartbeat_rabcon,
+                                  args=(self.rab_connections['fill_publisher'],
+                                        self.flags['hb_fill_publisher'],
+                                        'fill_publisher', ))
+            t2.start()
+            self._thread_tracker['hb_fill_publisher'] = t2
 
-        rab_con = RabbitConnection()
+            # 0ta 0ara 0r9bar
+            # para probar otra vez
+            logger.info('fill_publisher started')
 
-        self.rab_connections['fill_publisher'] = rab_con
+        @staticmethod
+        def _heartbeat_rabcon(con, flag, name, time_limit=1):
 
-        _start_event.set()
+            logger.debug(f"{name} heartbeat started")
+            while flag:
+                con.connection.process_data_events(time_limit=time_limit)
+            logger.debug(f"{name} heartbeat finished")
+
+        def _setup_fill_publisher(self, _start_event):
+
+            rab_con = RabbitConnection()
+
+            self.rab_connections['fill_publisher'] = rab_con
+
+            _start_event.set()
 
     def _update_fills(self):
 

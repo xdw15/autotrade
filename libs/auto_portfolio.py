@@ -126,12 +126,13 @@ class ToyPortfolio:
         #     initial_holdings,
         #     time_stamp
         # )
+
         self._init_composition()
 
         self.price_ccy = price_ccy or 'USD'
 
-        self.shutdown_event = {} # evaluate the purpose
-        self.thread_tracker = {} # create an individual dictionary for tracking the threads of each sub application
+        self.shutdown_event = {}  # evaluate the purpose
+        self.thread_tracker = {}  # create an individual dictionary for tracking the threads of each sub application
         self.rab_connections = {}
         self.order_tracker = {}
         self.order_counter = 0
@@ -302,52 +303,78 @@ class ToyPortfolio:
                 items=[self.mtm, df_0], how='vertical', rechunk=True
             )
 
-    def connect_db_endpoint(self):
+    class AutoPortDataHandlerEndpoint:
 
-        connection_event = threading.Event()
-        t = threading.Thread(target=self._setup_db_endpoint,
-                             args=(connection_event, ))
+        def __init__(self):
+            print('xd')
+            self.connect_db_endpoint()
 
-        self.thread_tracker['DH_endpoint'] = t
-        t.start()
-        with threading.Lock():
+        def connect_db_endpoint(self):
+            connection_event = threading.Event()
+            self.thread = threading.Thread(
+                target=self._setup_db_endpoint,
+                args=(connection_event, ))
+
+            self.thread.start()
+
             while not connection_event.is_set():
                 continue
 
-        logger.info('DH_endpoint started')
-        self.event_queue['DH_endpoint'] = queue.Queue()
+            logger.info('DH_endpoint started')
+            self.event_queue['DH_endpoint'] = queue.Queue()
 
-    def close_db_endpoint(self):
+        def close_db_endpoint(self):
 
-        id_endpoint = 'DH_endpoint'
-        self.rab_connections[id_endpoint].stop_plus_close()
+            id_endpoint = 'DH_endpoint'
+            self.rab_connections[id_endpoint].stop_plus_close()
 
-        if self.thread_tracker[id_endpoint].is_alive():
-            logger.warning('the db endpoint is still alive')
-        else:
-            logger.info('db endpoint closed succesfully')
+            if self.thread_tracker[id_endpoint].is_alive():
+                logger.warning('the db endpoint is still alive')
+            else:
+                logger.info('db endpoint closed succesfully')
 
-    def _setup_db_endpoint(self,
-                           connection_event: threading.Event):
+            rab_con_name = 'DH_endpoint'
+            if self.rab_con.connection.is_open:
 
-        # exchange = exchange or 'exchange_data_handler'
-        rab_con = RabbitConnection()
-        self.rab_connections['endpoint_data_handler'] = rab_con
+                self.rab_con.stop_plus_close()
 
-        rab_con.channel.exchange_declare(**exchange_declarations['AutoPort_DH_endpoint'])
+                if self.thread.is_alive():
+                    logger.warning(f'{rab_con_name} thread is still alive')
+                else:
+                    logger.info(f'{rab_con_name} thread closed succesfully')
+            else:
+                logger.info(f'{rab_con_name} connection closed already')
 
-        queue_declare = rab_con.channel.queue_declare(**queue_declarations['AutoPort_DH_endpoint'])
+        def _setup_db_endpoint(self,
+                               connection_event: threading.Event):
 
-        queue_declare = queue_declare.method.queue
+            # exchange = exchange or 'exchange_data_handler'
+            self.rab_con = RabbitConnection()
 
-        deque((rab_con.channel.queue_bind(
-            queue=queue_declare,
-            exchange=exchange_declarations['AutoPort_DH_endpoint']['exchange'],
-            routing_key=rt)
-            for rt in all_routing_keys['AutoPort_DH_endpoint']),
-            maxlen=0)
+            self.rab_con.channel.exchange_declare(
+                **exchange_declarations['DataHandler'])
 
-        def db_cllbck(ch, method, properties, body):
+            queue_declare = self.rab_con.channel.queue_declare(
+                **queue_declarations['AutoPort_DH_endpoint'])
+
+            queue_declare = queue_declare.method.queue
+
+            deque((self.rab_con.channel.queue_bind(
+                queue=queue_declare,
+                exchange=exchange_declarations['DataHandler']['exchange'],
+                routing_key=rt)
+                for rt in all_routing_keys['AutoPort_DH_endpoint']),
+                maxlen=0)
+
+            self.rab_con.channel.basic_consume(
+                queue=queue_declare,
+                on_message_callback=self.db_cllbck,
+                auto_ack=False)
+
+            connection_event.set()
+            self.rab_con.channel.start_consuming()
+
+        def db_cllbck(self, ch, method, properties, body):
 
             db_directory = {
                 'equity': db_path + '/us_equity.parquet'
@@ -383,7 +410,7 @@ class ToyPortfolio:
 
             if not all(payload_fields.values()):
                 logger.warning('the following tickers are not present in the data sent')
-                logger.warning(f'{[sec for sec, val in payload_fields.items() if val==False ]}')
+                logger.warning(f'{[sec for sec, val in payload_fields.items() if val == False]}')
                 logger.warning('event not processed')
                 return
 
@@ -397,13 +424,7 @@ class ToyPortfolio:
             )
 
             self.event_queue['DH_endpoint'].put({'data': df,
-                                            'time_stamp': msg_time_stamp})
-
-        rab_con.channel.basic_consume(queue=queue_declare,
-                                      on_message_callback=db_cllbck,
-                                      auto_ack=False)
-        connection_event.set()
-        rab_con.channel.start_consuming()
+                                                 'time_stamp': msg_time_stamp})
 
     def _setup_db_rpc_client(self):
 

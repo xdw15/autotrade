@@ -150,8 +150,8 @@ class DumbStrat:
 
         time_stamp = dt.datetime.strptime(body['time_stamp'], '%Y%m%d%H%M%S')
 
-        trigger_data_event = ((body['security']['type'] == 'equity')
-                                and (self.ticker in body['security']['tickers'])
+        trigger_data_event = ((body['info']['table'] == 'us_equity')
+                                and (self.ticker in body['info']['tickers'])
                                 and (self.last_signal_time_stamp + self.signal_frequency < time_stamp))
 
         channel.basic_ack(method.delivery_tag)
@@ -168,11 +168,11 @@ class DumbStrat:
         )
 
         signal_body = {'symbol': self.ticker,
-                       'signalPrice': current_price,
-                       'time_stamp': body['time_stamp'],
-                       'secType': 'STK',
-                       'tradeQty': 4,
                        'orderType': 'LMT',
+                       'lmtPrice': current_price,
+                       'signal_timestamp': body['time_stamp'],
+                       'secType': 'STK',
+                       'totalQuantity': 4,
                        # 'portAlloc': {'1': 0.9, '2': 0.1},
                        # 'typeAlloc': 'percent',
                        'portAlloc': {'1': 2, '2': 1},
@@ -188,7 +188,7 @@ class DumbStrat:
                     + f"-Action: {signal_body['action']} {self.ticker} @ {current_price}")
 
         channel.basic_publish(
-            body=json.dumps(body),
+            body=json.dumps(signal_body),
             exchange=exchange_declarations['OrderReceiver']['exchange'],
             routing_key=all_routing_keys['AutoPort_OrderReceiver']['DumbStrat'],
             properties=pika.BasicProperties(content_type='application/json',

@@ -14,9 +14,9 @@ exchange_declarations = {
     'OrderReceiver': {"exchange": "placement_order_exchange",
                        "exchange_type": "topic",
                        "passive": False},
-    'AutoPort_DH_endpoint': {'exchange': 'exchange_datahandler',
-                            'exchange_type': 'topic',
-                            'passive': False}
+    'DataHandler': {'exchange': 'datahandler_exchange',
+                    'exchange_type': 'topic',
+                    'passive': False}
 }
 
 all_routing_keys = {
@@ -26,6 +26,9 @@ all_routing_keys = {
     'AutoPort_OrderReceiver': {'DumbStrat': 'DumbStrat_SignalSubscription'}
 
 }
+
+autoport_tables = ['us_equity',
+                   ]
 
 queue_declarations = {
     'AutoPort_OrderReceiver': {'queue': 'AutoPort_OrderReceiver',
@@ -56,6 +59,7 @@ ibg_connection_params = {
 ib_order_kwargs = {'tif': "DAY",
                    "account": ib_account[ib_mode],
                    "clearingIntent": "IB"}
+
 
 
 

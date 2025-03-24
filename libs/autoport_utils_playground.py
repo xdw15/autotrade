@@ -79,8 +79,9 @@ class ParquetHandler:
     def __init__(self, path):
         self.path = path
         self.lock = threading.Lock()
-        sc = pl.read_parquet_schema(path)
-        del sc
+        self.read_event = threading.Event()
+        self.sc = pl.read_parquet_schema(path)
+        # del sc
 
     def get(self, filtro=None):
 
@@ -89,6 +90,9 @@ class ParquetHandler:
         else:
             df = pl.scan_parquet(self.path).filter(filtro).collect()
         return df
+
+    def get_scan(self):
+        return pl.scan_parquet(self.path)
 
     def get_lastdate(self, col_name='timestamp'):
         """
@@ -102,24 +106,50 @@ class ParquetHandler:
         :param overrides: dictionary of overrides
         :return: returns table with the new row
         """
+
         if isinstance(new_row, dict):
             new_row = [new_row]
 
+        if isinstance(new_row, list):
+            df_new_row = pl.DataFrame(data=new_row,
+                                      # schema=df.columns,
+                                      schema_overrides=overrides)
+        elif isinstance(new_row, pl.DataFrame):
+            df_new_row = new_row
+
+        else:
+            print('row could not be added, dtype of new row not admitted')
+            return
+
         df = self.get()
-        df_new_row = pl.DataFrame(data=new_row,
-                                  # schema=df.columns,
-                                  schema_overrides=overrides)
         df = pl.concat(items=[df, df_new_row], how='vertical', rechunk=True)
         return df
 
-    def update(self, new_row, overrides=None):
+    def update(self, new_row,
+               overrides=None,
+               unique_subset=None,
+               sleep_fun=time.sleep,
+               sleep_time=1):
         """
         :param new_row: can be a dict or list of dicsts
         :param overrides: dict of overrides
+        :param sleep_fun: function to sleep, must be callable with one param
+        :param sleep_time: self-explanatory
+        :param unique_subset: allows for dropping duplicate rows
         :return: updates (writes) the table with the new row
         """
         updated_df = self.addrow(new_row, overrides)
-        updated_df.write_parquet(self.path)
+
+        if unique_subset is not None:
+            updated_df = updated_df.unique(subset=unique_subset)
+
+        trials = 0
+        while self.read_event.is_set() and (trials < 10):
+            sleep_fun(sleep_time)
+            trials += 1
+
+        with self.lock:
+            updated_df.write_parquet(self.path)
 
     def get_start_ts(self, event_timestamp_, timestamp_col='timestamp') -> pl.Series:
         """
@@ -268,8 +298,8 @@ class PositionHandler:
 
         p_equity_temp = (
             self.p_equity
-            .get((pl.col('date')>= ts_to_update[0])
-                    & (pl.col('date') <= ts_to_update[-1]) )
+            .get((pl.col('date') >= ts_to_update[0])
+              & (pl.col('date') <= ts_to_update[-1]))
             .rename({'date': 'timestamp'})
             .with_columns(timestamp=pl.col('timestamp').dt.cast_time_unit('us'))
         )
@@ -333,14 +363,12 @@ class PositionHandler:
                     mtm=pl.col('price') * pl.col('amount'),
                     pnl=pl.col('price') * pl.col('amount') - pl.col('trade_cost_basis') - pl.col('mtm_prev')
                 )
-                .with_columns(ret=pl.when(pl.col('amount_prev') == 0.0 )
+                .with_columns(ret=pl.when(pl.col('amount_prev') == 0.0)
                               .then(pl.col('mtm')/pl.col('trade_cost_basis')-1.0)
                               .otherwise(pl.col.pnl/pl.col.mtm_prev))
 
                 .select(start_position.columns)
             )
-
-
 
             end_position_cash = (
                 start_position_cash

@@ -7,6 +7,7 @@ import queue
 from libs.rabfile import *
 from libs.config import *
 import datetime as dt
+from libs.autoport_utils_playground import *
 
 dict_of_equity_files = [
     {'ticker': 'DTCR',
@@ -33,6 +34,137 @@ dict_of_equity_files = [
      'path': work_path + '/archivosvarios/dta_spy_250306_10.parquet'},
 
 ]
+
+
+class FakeStreamer:
+
+    def __init__(self, generator, output_queue):
+
+        self.event_queue = output_queue
+        self.connect_csv_endpoint(generator)
+
+    def connect_csv_endpoint(self,
+                             generator: Generator):
+
+        self.shutdown_event = threading.Event()
+        self.thread = threading.Thread(
+            target=self._setup_connect_csv_endpoint,
+            args=(generator, ))
+        self.thread.start()
+
+    def close_csv_endpoint(self):
+        if self.shutdown_event.is_set():
+            logger.info('csv_endpoint was closed already')
+        else:
+            self.shutdown_event.set()
+
+    def _setup_connect_csv_endpoint(self,
+                                    generator: Generator):
+        # import pyarrow.parquet as pq
+
+        # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
+
+        logger.debug('started streaming from csv endpoint')
+
+        for beat in generator:
+            self.event_queue.put({'data': beat,
+                                  'table': 'us_equity'})
+            time_stamp = beat['date'][0]
+            logger.debug(f"data streamed from csv_api {time_stamp}")
+
+            if self.shutdown_event.is_set():
+                print('csv connection closed')
+                logger.info('csv connection closed')
+                return
+
+
+class DBMaintainer:
+
+    def __init__(self, event_queue, equity_table):
+        """
+
+        :param event_queue:
+        :param equity_table: must be ParquetHandler
+        """
+        self.start_db_maintainer()
+        self.event_queue = event_queue
+        self.equity_table = equity_table
+
+    def start_db_maintainer(self):
+        self.shutdown_event = threading.Event()
+
+        start_event = threading.Event()
+
+        self.thread = threading.Thread(
+            target=self._setup_db_maintainer,
+            args=(start_event,))
+
+        self.thread.start()
+
+        while not start_event.is_set():
+            continue
+
+        logger.debug('DataMaintainer process started')
+
+    def stop_db_maintainer(self):
+        if self.shutdown_event.is_set():
+            logger.info('db maintainer was stopped already')
+        else:
+            self.shutdown_event.set()
+
+    def _setup_db_maintainer(self, start_event):
+
+        self.rab_con = RabbitConnection()
+        # self.rab_connections['handler'] = rab_con
+        self.rab_con.channel.exchange_declare(**exchange_declarations['DataHandler'])
+
+        start_event.set()
+
+        while not self.shutdown_event.is_set():
+
+            try:
+                queue_item = self.event_queue.get(block=False)
+            except queue.Empty:
+                self.rab_con.connection.sleep(1)
+                continue
+
+            if queue_item['table'] == 'us_equity':
+                self.maintain_us_equity(queue_item)
+            else:
+                print(f"table name: {queue_item['table']} not recognized")
+
+        self.rab_con.connection.close()
+        logger.debug('Data maintainer was shutdown')
+
+    def maintain_us_equity(self, queue_item):
+
+        data = (
+            queue_item['data']
+            .with_columns(timestamp_write=dt.datetime.now())
+        )
+
+        self.equity_table.update(new_row=data,
+                                 unique_subset=['date', 'ticker'],
+                                 sleep_fun=self.rab_con.connection.sleep,
+                                 sleep_time=1)
+
+        tbl_name = queue_item['table']
+        import string
+        timestamp = data['date'][0]
+        mensaje = {'timestamp': timestamp.strftime('%Y%m%d%H%M%S'),
+                   'table_name': tbl_name,
+                   'tickers': data['ticker'].to_list(),
+                   'event': 'new_data',
+                   'large_shit': [string.printable] * 10000}  # delete this later
+
+        self.rab_con.channel.basic_publish(
+            exchange='exchange_data_handler',
+            routing_key=f'data_csv.{tbl_name}',
+            body=json.dumps(mensaje),
+            properties=pika.BasicProperties(content_type='application/json'))
+
+        logger.debug(f"updated tbl---{tbl_name}---sent: {timestamp.strftime('%c')}")
+        self.event_queue.task_done()
 
 
 class MockIbApi:
@@ -134,7 +266,7 @@ class BasicDataHandler:
 
             if tbl in supported_tables:
                 if os_path.exists(tbl_path):
-                    self.db_connection[tbl] = tbl_path
+                    self.db_path[tbl] = tbl_path
                 else:
                     logger.error(f'data base path not found for table: {tbl}')
                     raise Exception(f'data base path not found for table: {tbl}')
@@ -145,252 +277,117 @@ class BasicDataHandler:
 
         self.feeds = {}
 
-        # <editor-fold desc="ways to shut down stuff">
-        self.shutdown_event = {}
+        self.tbl_us_equity = ParquetHandler(
+            work_path + '/synthetic_server_path/us_equity.parquet')
+        self.queue_db_maintainer = queue.Queue()
+        self.db_maintainer = DBMaintainer(
+            event_queue=self.queue_db_maintainer,
+            equity_table=self.tbl_us_equity)
 
-        # </editor-fold>
-
-        # <editor-fold desc="assigning other attributes">
-        self.queue_db_handler = queue.Queue()
-        self.rab_connections = {}
-        self.read_permissions = {security: threading.Event()
-                                 for security in supported_securities}
-        self.thread_tracker = {}
-        # </editor-fold>
-
-        self.start_db_maintainer()
-        self.start_db_rpc_api()
+        self.read_events = {
+            'us_equity': self.tbl_us_equity.read_event, }
+        self.rpc_read = DataHandlerRPC(self.read_events)
 
     def connect_ib_feed(self, generator, output_queue):
 
         self.feeds['ib'] = FakeStreamer(generator, output_queue)
 
 
-class FakeStreamer:
+class DataHandlerRPC:
+    def __init__(self, dic_read_events):
+        """
+        RPC for updating reading events
+        :param dic_read_event:
+        """
 
-    def __init__(self, generator, output_queue):
-
-        self.master_queue = output_queue
-        self.connect_csv_endpoint(generator)
-
-    def connect_csv_endpoint(self,
-                             generator: Generator):
-
-        self.shutdown_event = threading.Event()
-        self.thread = threading.Thread(
-            target=self._setup_connect_csv_endpoint,
-            args=(generator, ))
-        self.thread.start()
-
-    def close_csv_endpoint(self):
-        if self.shutdown_event.is_set():
-            logger.info('csv_endpoint was closed already')
-        else:
-            self.shutdown_event.set()
-
-    def _setup_connect_csv_endpoint(self,
-                                    generator: Generator):
-        # import pyarrow.parquet as pq
-
-        # sche = pq.read_schema(work_path + '/synthetic_server_path/us_equity.parquet')
-
-        logger.debug('started streaming from csv endpoint')
-
-        for beat in generator:
-            self.master_queue.put(
-                {'data': beat, })
-            time_stamp = beat['date'][0]
-            logger.debug(f"data streamed from csv_api {time_stamp}")
-
-            if self.shutdown_event.is_set():
-                print('csv connection closed')
-                logger.info('csv connection closed')
-                return
-
-
-
-class DBMaintainer:
-
-    def __init__(self):
-        self.start_db_maintainer()
-
-
-    def start_db_maintainer(self):
-        self.shutdown_event = threading.Event()
-
-        self.shutdown_event = threading.Event()
-
-        self.thread = threading.Thread(
-            target=self._setup_db_maintainer,
-            args=())
-        self.thread.start()
-
-    def stop_db_maintainer(self):
-        if self.shutdown_event.is_set():
-            logger.info('db maintainer was stopped already')
-        else:
-            self.shutdown_event.set()
-
-    def _setup_db_maintainer(self):
-
-        from libs.rabfile import RabbitConnection
-
-        rab_con = RabbitConnection()
-#        self.rab_connections['handler'] = rab_con
-        rab_con.channel.exchange_declare(
-            exchange='exchange_data_handler',
-            exchange_type='topic',
-            passive=False,
-            auto_delete=False
-        )
-
-        logger.debug('DataHandler process started')
-
-        while not self.shutdown_event['db_maintainer'].is_set():
-
-            try:
-                queue_item = self.queue_db_handler.get(block=False)
-            except queue.Empty:
-                rab_con.connection.sleep(1)
-                continue
-
-            security = queue_item['info']
-            data = (
-                queue_item['data']
-                .with_columns(timestamp_write=dt.datetime.now())
-            )
-
-            temp_connection = pl.read_parquet(
-                self.db_connection[security]
-            )
-
-            temp_connection = pl.concat(
-                items=[temp_connection, data],
-                how='vertical'
-            )
-
-            while self.read_permissions[security].is_set():
-                rab_con.connection.sleep(1)
-
-            temp_connection.write_parquet(
-                self.db_connection[security]
-            )
-
-            import string
-            time_stamp = data['date'][0]
-            mensaje = {'time_stamp': time_stamp.strftime('%Y%m%d%H%M%S'),
-                       'security': {'type': security,
-                                    'tickers': data['ticker'].to_list()},
-                       'event': 'new_data',
-                       'large_shit': [string.printable] * 10000}  # delete this later
-
-            rab_con.channel.basic_publish(
-                exchange='exchange_data_handler',
-                routing_key=f'data_csv.{security}',
-                body=json.dumps(mensaje),
-                properties=pika.BasicProperties(content_type='application/json')
-            )
-
-            logger.debug(f"data---{security}---sent: {time_stamp.strftime('%c')}")
-            self.queue_db_handler.task_done()
-
-        rab_con.connection.close()
-        logger.debug('Data maintainer was shutdown')
+        self.read_events = dic_read_events
+        self.start_db_rpc_api()
 
     def start_db_rpc_api(self):
 
         connection_event = threading.Event()
-        t = threading.Thread(target=self._setup_db_rpc_api,
-                             args=(connection_event,))
+        self.thread = threading.Thread(
+            target=self._setup_db_rpc_api,
+            args=(connection_event, ))
 
-        self.thread_tracker['rpc_api'] = t
-        t.start()
+        self.thread.start()
 
-        with threading.Lock():
-            while not connection_event.is_set():
-                pass
-
+        while not connection_event.is_set():
+            pass
         logger.info('db_rpc_api started')
 
     def stop_db_rpc_api(self):
-        if self.rab_connections['rpc_api'].connection.is_open:
-            (
-                self.rab_connections['rpc_api']
-                .connection.add_callback_threadsafe(
-                    self.rab_connections['rpc_api']
-                    .channel.stop_consuming
-                )
-            )
 
-            (
-                self.rab_connections['rpc_api']
-                .connection.add_callback_threadsafe(
-                    self.rab_connections['rpc_api']
-                    .connection.close
-                )
-            )
+        rab_con_name = 'dh_rpc_api'
+        if self.rab_con.connection.is_open:
 
-            if self.thread_tracker['rpc_api'].is_alive():
-                tag = 'open'
+            self.rab_con.stop_plus_close()
+
+            if self.thread.is_alive():
+                logger.warning(f'{rab_con_name} thread is still alive')
             else:
-                tag = 'closed'
-            logger.info(f'rpc_api closed, thread is {tag}')
+                logger.info(f'{rab_con_name} thread closed succesfully')
         else:
-            logger.info('rpc_api connection closed already')
+            logger.info(f'{rab_con_name} connection closed already')
 
     def _setup_db_rpc_api(self,
                           connection_event):
 
-        name_exchange = 'exchange_data_handler_rpc'
-        name_queue = 'rpc_data_handler'
-        rab_con = RabbitConnection()
-        self.rab_connections['rpc_api'] = rab_con
-        rab_con.channel.exchange_declare(exchange=name_exchange,
-                                         exchange_type='direct',
-                                         passive=False)
+        name_queue = 'rpc_DataHandler'
+        name_exchange = 'exchange_rpc_DataHandler'
 
-        rab_con.channel.queue_delete(queue=name_queue)
-        rab_con.channel.queue_declare(queue=name_queue,
-                                      passive=False,
-                                      exclusive=True,
-                                      auto_delete=False,
-                                      arguments={'x-consumer-timeout': 180_000})
+        self.name_exchange = name_exchange
+        self.rab_con = RabbitConnection()
+        self.rab_con.channel.exchange_declare(
+            exchange=name_exchange,
+            exchange_type='direct',
+            passive=False)
 
-        rab_con.channel.queue_bind(queue=name_queue,
-                                   exchange=name_exchange,
-                                   routing_key=f"rt_{name_queue}")
+        self.rab_con.channel.queue_delete(queue=name_queue)
+        self.rab_con.channel.queue_declare(
+            queue=name_queue,
+            passive=False,
+            exclusive=True,
+            auto_delete=False,
+            arguments={'x-consumer-timeout': 180_000})
 
-        def rpc_cllbck(ch, method, properties, body):
-            if properties.content_type != 'application/json':
-                raise Exception(f"Content type not json or specified")
+        self.rab_con.channel.queue_bind(
+            queue=name_queue,
+            exchange=name_exchange,
+            routing_key=f"rt_{name_queue}")
 
-            body = json.loads(body)
-            if body['permission'] == 'acquire':
-                self.read_permissions[body['security']].set()
-            elif body['permission'] == 'release':
-                self.read_permissions[body['security']].clear()
-
-            rab_con.channel.basic_publish(
-                exchange=name_exchange,
-                routing_key=body['routing_key'],
-                body=json.dumps({'response': 'granted'}),
-                properties=pika.BasicProperties(
-                    content_type='application/json',
-                )
-            )
-
-            ch.basic_ack(delivery_tag=method.delivery_tag)
-
-        rab_con.channel.basic_qos(prefetch_count=1)
-        rab_con.channel.basic_consume(queue=name_queue,
-                                      on_message_callback=rpc_cllbck,
-                                      exclusive=True)
+        self.rab_con.channel.basic_qos(prefetch_count=1)
+        self.rab_con.channel.basic_consume(
+            queue=name_queue,
+            on_message_callback=self.rpc_cllbck,
+            exclusive=True)
 
         connection_event.set()
-        rab_con.channel.start_consuming()
+        self.rab_con.channel.start_consuming()
         logger.info('db_rpc_api stopped')
 
+    def rpc_cllbck(self, ch, method, properties, body):
+        if properties.content_type != 'application/json':
+            raise Exception(f"Content type not json or specified")
 
+        body = json.loads(body)
+        table_name = body['table_name']
+        if body['permission'] == 'acquire':
+            self.read_events[table_name].set()
+        elif body['permission'] == 'release':
+            self.read_events[table_name].clear()
+
+        self.rab_con.channel.basic_publish(
+            exchange=self.name_exchange,
+            # routing_key=body['routing_key'],
+            routing_key=properties.reply_to,
+            body=json.dumps({'response': f"event_set_to_{body['permission']}",
+                             'table_name': table_name}),
+            properties=pika.BasicProperties(
+                content_type='application/json', )
+        )
+
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
 
