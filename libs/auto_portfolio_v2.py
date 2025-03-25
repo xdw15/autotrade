@@ -154,8 +154,9 @@ class AutoExecRPCEndpoint:
 
     def __init__(self, autoport, event_queue):
         self.autoport = autoport
-        self._start_autoexecution_rpc_client()
         self.event_queue = event_queue
+
+        self._start_autoexecution_rpc_client()
 
     def _start_autoexecution_rpc_client(self):
 
@@ -380,7 +381,6 @@ class OrderReceiver:
             target=self._setup_order_receiver_endpoint,
             args=(connection_event, ))
 
-        self.thread_tracker['OrderReceiver'] = t
         self.thread.start()
 
         while not connection_event.is_set():
@@ -391,7 +391,6 @@ class OrderReceiver:
                                        connection_event):
 
         self.rab_con = RabbitConnection()
-        self.rab_connections['OrderReceiver'] = rab_con
         self.rab_con.channel.exchange_declare(
             **exchange_declarations["OrderReceiver"])
         queue_declare = self.rab_con.channel.queue_declare(
@@ -437,7 +436,7 @@ class OrderReceiver:
 class AutoRiskManager:
     def __init__(self, auto_portfolio):
         self.autoport = auto_portfolio
-        self.pass_through_orders = True
+        self.pass_through_orders = False
         logger.info('Risk Manager started')
 
         self.order_confirmations = {}
@@ -474,6 +473,38 @@ class AutoRiskManager:
 
         return output
 
+class AutoUpdatePort:
+
+    def __init__(self, autoport, freq):
+
+        self.autoport = autoport
+        self.switch_event = threading.Event()
+        self.freq = freq
+
+    def start(self):
+
+        self.switch_event.clear()
+        self.thread = threading.Thread(
+            target=self._setup_autoupdate,
+            args=()
+        )
+
+        self.thread.start()
+
+        print(f"AutoUpdate started")
+    def _setup_autoupdate(self):
+
+        while not self.switch_event.is_set():
+            self.autoport.update_portfolio()
+            time.sleep(self.freq)
+    def stop(self):
+
+        self.switch_event.set()
+
+        while self.thread.is_alive():
+            continue
+
+        print(f"AutoUpdate stopped")
 
 class ToyPortfolio:
     """
@@ -481,9 +512,10 @@ class ToyPortfolio:
     """
 
     def __init__(self,
-                 initial_holdings: dict,
-                 time_stamp: str,
-                 price_ccy: str = None):
+                 start_timestamp,
+                 start_auto_update = True,
+                 freq_auto_update = 10,
+                 price_ccy = 'USD'):
         """
         the class is a system that manages the updating
         of the holdings (securities and cash) and calculations (pnl, mtm, etc) tables
@@ -495,13 +527,15 @@ class ToyPortfolio:
 
         the class portfolio should be able to invoke the same tool that would update the table
         in a non-event fashion. i.e., through manually calling a script.
-
-        :param initial_holdings:
-        :param time_stamp:
+        :param start_timestamp:
+        :param start_auto_update:
+        :param freq_auto_update:
         :param price_ccy:
         """
 
-        time_stamp = dt.datetime.strptime(time_stamp, '%Y%m%d%H%M%S')
+        self.price_ccy = price_ccy
+        self.freq_auto_update = freq_auto_update
+        #start_timestamp = dt.datetime.strptime(time_stamp, '%Y%m%d%H%M%S')
 
         self.orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet')
         self.fills = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet')
@@ -526,7 +560,7 @@ class ToyPortfolio:
             self.orders.get_lazy()
             .with_columns(order_tstmp=pl.col.order_itag.str.slice(0, 6),
                           order_n=pl.col.order_itag.str.slice(6).cast(pl.Int64))
-            .filter(pl.col.order_tstmp == time_stamp.strftime('%y%m%d'))
+            .filter(pl.col.order_tstmp == start_timestamp.strftime('%y%m%d'))
             # .filter(pl.col.order_tstmp == '250219')
             .select(pl.col.order_n.max().drop_nulls())
             .collect()
@@ -544,59 +578,17 @@ class ToyPortfolio:
         self.rpc_endpoint = AutoExecRPCEndpoint(self, self.q_fill_event)
         self.order_receiver = OrderReceiver(self)
         self.risk_manager = AutoRiskManager(self)
+        self.auto_update = AutoUpdatePort(self)
 
+        if start_auto_update:
 
-
+            self.auto_update.start()
         # ----------
 
         # self.positions = self._init_composition(
         #     initial_holdings,
         #     time_stamp
         # )
-
-        self._init_composition()
-
-        self.price_ccy = price_ccy or 'USD'
-
-        self.shutdown_event = {}  # evaluate the purpose
-        self.thread_tracker = {}  # create an individual dictionary for tracking the threads of each sub application
-        self.rab_connections = {}
-        self.order_tracker = {}
-        self.order_counter = 0
-        self.flags = {}
-        self.lock_readwrite = threading.Lock()
-
-        # <editor-fold desc="instance updatables">
-        self.mtm = None
-        self.pnl = None
-        # </editor-fold>
-
-        # <editor-fold desc="instance queue container">
-        self.event_queue = {}
-        # </editor-fold>
-
-        self._start_risk_manager()
-
-        # table handlers
-        self.tables = {
-            'equity': ParquetHandler(
-                work_path
-                + '/synthetic_server_path/auto_port/holdings/equity.parquet'),
-            'cash': ParquetHandler(
-                work_path
-                + '/synthetic_server_path/auto_port/holdings/cash.parquet'),
-            'blotLog': ParquetHandler(
-                work_path
-                + '/synthetic_server_path/auto_port/blotter_log.parquet'),
-            'blotter': ParquetHandler(
-                work_path
-                + '/synthetic_server_path/auto_port/blotter.parquet'),
-            'blotAlloc': ParquetHandler(
-                work_path
-                + '/synthetic_server_path/auto_port/blotter_alloc.parquet'),
-        }
-
-        # supported securities and required fields per security
 
     def update_portfolio(self):
 
@@ -609,6 +601,9 @@ class ToyPortfolio:
             return
 
         self.pos_handler.update_tables(events)
+
+        timestamp = dt.datetime.now()
+        print(f"AutoPort updated - {timestamp.strftime('%y%m%d-%H:%M:%S')}")
 
     def process_fill_queue(self):
         empty_event = False

@@ -126,10 +126,12 @@ class AutoExecAutoUpdater:
 
     def __init__(self, autoexec):
         self.autoexec = autoexec
+        self.switch_event = threading.Event()
         # self.start_autoupdate()
 
     def start(self):
 
+        self.switch_event.clear()
         self.thread = threading.Thread(
             target=self._setup_autoupdater,
             args=())
@@ -139,7 +141,7 @@ class AutoExecAutoUpdater:
 
     def _setup_autoupdater(self):
 
-        while self.autoexec.auto_update:
+        while not self.switch_event.is_set():
             with threading.Lock():
                 self.autoexec.update_system()
                 time.sleep(self.autoexec.update_freq)
@@ -148,158 +150,9 @@ class AutoExecAutoUpdater:
         print('autoupdate stopped')
 
     def stop_autoupdate(self):
-        self.autoexec.auto_update = False
+        self.switch_event.set()
         while self.thread.is_alive():
             pass
-
-
-class AutoExecution:
-
-    def __init__(self,
-                 flag_auto_update=True,
-                 update_freq=10):
-
-        self.fill_publisher = FillPublisher()
-        self.place_order_rpc_server = AutoExecRPC(self)
-        self.auto_updater = AutoExecAutoUpdater(self)
-
-        self.client_ib = IBHandler(self)
-        self.client_csv = CSVHandler(self)
-
-        self.orders = ParquetHandler(
-            work_path
-            + '/synthetic_server_path/auto_exec/order_record.parquet')
-
-        self.fills = ParquetHandler(
-            work_path
-            + '/synthetic_server_path/auto_exec/fill_record.parquet')
-
-        # -----
-        self.trading_connections = {}
-        self.rab_connections = {}
-        self._thread_tracker = {}
-
-        self.placed_orders = {}
-
-        self.flags = {}
-
-        self.session_id = dt.datetime.now().strftime('%y%m%d')
-        # self.reply_to_orders = {}
-
-        self.flag_auto_update = flag_auto_update
-        self.update_freq = update_freq
-        # start threads
-        self._start_autoexecution()
-
-    def _start_autoexecution(self):
-        self._connect_trading_apis()
-        self.fill_publisher.start()
-        self.place_order_rpc_server.start()
-        if self.flag_auto_update:
-            self.auto_updater.start()
-
-    def update_system(self):
-        timestamp = dt.datetime.now()
-        self._update_fills()
-        print(f"AutoExec updated - {timestamp.strftime('%c')}")
-
-    def _connect_trading_apis(self):
-
-        self.client_ib.connect()
-        # self._ib_placed_orders = {}
-        self.client_csv.connect()
-
-    def _update_fills(self):
-
-        if trading_router == 'ib':
-            filled_orders = self.client_ib.update_fills()
-        elif trading_router == 'csv':
-            filled_orders = self.client_csv.update_fills()
-        else:
-            raise Exception(f'{trading_router} not recognized')
-
-        if len(filled_orders) == 0:
-            # print('No new fills')
-            logger.info(f"no fills for this timestamp")
-            return
-
-        # The program is supposed to concat multiple filled orders from several apis
-        # in this case there is only one appi so no concat needed
-        filled_orders = filled_orders[0]
-        unique_order_itag = filled_orders['order_itag'].unique()
-
-        # updating the db_fill and db_order
-        updated_orders_db = (
-            # db_order_record
-            self.orders.get()
-            .with_columns(
-                # update status
-                pl.when(pl.col('order_itag').is_in(unique_order_itag))
-                .then(pl.lit('filled'))
-                .otherwise(pl.col('status'))
-                .alias('status'),
-                # update status_timestamp
-                pl.when(pl.col('order_itag').is_in(unique_order_itag))
-                .then(pl.lit(dt.datetime.now()))
-                .otherwise(pl.col('status_timestamp'))
-                .alias('status_timestamp'))
-        )
-
-        orders_to_update = (
-            updated_orders_db
-            .filter(pl.col('order_itag').is_in(unique_order_itag))
-            .select('order_itag', 'reply_to'))
-
-        if len(orders_to_update) != len(unique_order_itag):
-            logger.error('N of orders to update is not equal to fills')
-            raise Exception('N of orders to update is not equal to fills')
-
-        self.orders.write(new_df=updated_orders_db)
-
-        self.fills.update(new_row=filled_orders)
-
-        # deque((self.placed_orders.pop(key) for key in unique_order_itag), maxlen=0)
-
-        # publishing part
-        rab_con = self.fill_publisher.rab_con
-        filled_orders = (
-            filled_orders
-            .select(
-                fill_ts=pl.col('fill_timestamp').dt.strftime('%Y%m%d%H%M%S'))
-        )
-        for filled_tag, reply_to_tag in zip(orders_to_update['order_itag'],
-                                            orders_to_update['reply_to']):
-
-            fill_ts = (
-                filled_orders
-                .filter(pl.col('fill_ts').is_in([filled_tag]))
-                ['fill_ts'].to_list()
-            )
-
-            body = {'order_itag': filled_tag,
-                    'sessionId': self.session_id,
-                    'fill_timestamps': fill_ts}
-            body = json.dumps(body)
-
-            def publisher(): return rab_con.channel.basic_publish(
-                exchange=exchange_declarations['OrderExecution']['exchange'],
-                routing_key=reply_to_tag,
-                body=body,
-                properties=pika.BasicProperties(content_type='application/json'))
-
-            rab_con.connection.add_callback_threadsafe(publisher)
-
-        logger.info('fill events updated')
-
-    def place_order(self, order_info):
-        if trading_router == 'ib':
-            self.client_ib.place_order(order_info)
-        elif trading_router == 'csv':
-            self.client_csv.place_order(order_info)
-        else:
-            raise Exception(f'{trading_router=} not recognized')
-
-        return trading_router
 
 
 class IBHandler:
@@ -480,12 +333,154 @@ class CSVHandler:
         pass
 
 
+class AutoExecution:
+
+    def __init__(self,
+                 start_auto_update=True,
+                 update_freq=10):
+
+        self.fill_publisher = FillPublisher()
+        self.place_order_rpc_server = AutoExecRPC(self)
+        self.auto_updater = AutoExecAutoUpdater(self)
+
+        self.client = {'ib': IBHandler(self),
+                       'csv': CSVHandler(self)}
+
+        for api_name in allowed_trading_apis:
+            if api_name not in self.client.keys():
+                print(f"the api {api_name} has no associated client")
+                raise Exception
+
+        self.orders = ParquetHandler(
+            work_path
+            + '/synthetic_server_path/auto_exec/order_record.parquet')
+
+        self.fills = ParquetHandler(
+            work_path
+            + '/synthetic_server_path/auto_exec/fill_record.parquet')
+
+        self.session_id = dt.datetime.now().strftime('%y%m%d')
+
+        # -----
+        # self.reply_to_orders = {}
+        self.start_auto_update = start_auto_update
+        self.update_freq = update_freq
+        # start threads
+        self._start_autoexecution()
+
+    def _start_autoexecution(self):
+        self._connect_trading_apis()
+        self.fill_publisher.start()
+        self.place_order_rpc_server.start()
+        if self.start_auto_update:
+            self.auto_updater.start()
+
+    def update_system(self):
+        timestamp = dt.datetime.now()
+        self._update_fills()
+        print(f"AutoExec updated - {timestamp.strftime('%c')}")
+
+    def _connect_trading_apis(self):
+
+        for api_name in allowed_trading_apis:
+            self.client[api_name].connect()
+
+    def _update_fills(self):
+
+        filled_orders = []
+        for api_name in allowed_trading_apis:
+            filled_orders.append(
+                self.client[api_name].update_fills()
+            )
 
 
+        if len(filled_orders) == 0:
+            # print('No new fills')
+            logger.info(f"no fills for this timestamp")
+            return
+
+        # The program is supposed to concat multiple filled orders from several apis
+        # in this case there is only one appi so no concat needed
+        filled_orders = filled_orders[0]
+        unique_order_itag = filled_orders['order_itag'].unique()
+
+        # updating the db_fill and db_order
+        updated_orders_db = (
+            # db_order_record
+            self.orders.get()
+            .with_columns(
+                # update status
+                pl.when(pl.col('order_itag').is_in(unique_order_itag))
+                .then(pl.lit('filled'))
+                .otherwise(pl.col('status'))
+                .alias('status'),
+                # update status_timestamp
+                pl.when(pl.col('order_itag').is_in(unique_order_itag))
+                .then(pl.lit(dt.datetime.now()))
+                .otherwise(pl.col('status_timestamp'))
+                .alias('status_timestamp'))
+        )
+
+        orders_to_update = (
+            updated_orders_db
+            .filter(pl.col('order_itag').is_in(unique_order_itag))
+            .select('order_itag', 'reply_to'))
+
+        if len(orders_to_update) != len(unique_order_itag):
+            logger.error('N of orders to update is not equal to fills')
+            raise Exception('N of orders to update is not equal to fills')
+
+        self.orders.write(new_df=updated_orders_db)
+
+        self.fills.update(new_row=filled_orders)
+
+        # deque((self.placed_orders.pop(key) for key in unique_order_itag), maxlen=0)
+
+        # publishing part
+        rab_con = self.fill_publisher.rab_con
+        filled_orders = (
+            filled_orders
+            .select(
+                fill_ts=pl.col('fill_timestamp').dt.strftime('%Y%m%d%H%M%S'))
+        )
+        for filled_tag, reply_to_tag in zip(orders_to_update['order_itag'],
+                                            orders_to_update['reply_to']):
+
+            fill_ts = (
+                filled_orders
+                .filter(pl.col('fill_ts').is_in([filled_tag]))
+                ['fill_ts'].to_list()
+            )
+
+            body = {'order_itag': filled_tag,
+                    'sessionId': self.session_id,
+                    'fill_timestamps': fill_ts}
+            body = json.dumps(body)
+
+            def publisher(): return rab_con.channel.basic_publish(
+                exchange=exchange_declarations['OrderExecution']['exchange'],
+                routing_key=reply_to_tag,
+                body=body,
+                properties=pika.BasicProperties(content_type='application/json'))
+
+            rab_con.connection.add_callback_threadsafe(publisher)
+
+        logger.info('fill events updated')
+
+    def place_order(self, order_info):
+
+        api_name = self.pick_trade_venue(order_info)
+        self.client[api_name].place_order(order_info)
+
+        return api_name
+
+    @staticmethod
+    def pick_trade_venue(order):
+        type(order)
+        return default_api
 
 
-
-# i just want you to take a moment to remember that ten years ago
+# I just want you to take a moment to remember that ten years ago
 # you sat down to take a mock college admission test. It was the
 # first time that you were competing with a bigger pool of people.
 # or at least the first time you were physically aware of it.

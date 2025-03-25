@@ -5,7 +5,12 @@ work_path = getcwd().replace('\\', '/')
 db_path = work_path + '/synthetic_server_path'
 
 
-trading_router = 'ib'
+
+
+allowed_trading_apis = ['csv', ]
+# allowed_trading_apis = ['csv', 'ib']
+default_api = allowed_trading_apis[0]
+
 
 exchange_declarations = {
     'OrderExecution': {"exchange": 'execution_order_exchange',
@@ -47,7 +52,7 @@ queue_declarations = {
 }
 
 # hkrkyf760 - @Tomate4
-ib_mode = 'live'
+ib_mode = 'paper'
 ib_account = {'live': 'U9765800',
               'paper': 'DU7219906'}
 ibg_connection_params = {
