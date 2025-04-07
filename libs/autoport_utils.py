@@ -3,6 +3,12 @@ import time
 import polars as pl
 import datetime as dt
 from libs.config import work_path
+import pyarrow.parquet as pa_parquet
+import pyarrow as pa
+import logging
+
+
+logger = logging.getLogger('autotrade.' + __name__)
 
 
 class ParquetHandler:
@@ -14,17 +20,43 @@ class ParquetHandler:
         self.sc = pl.read_parquet_schema(path)
         # del sc
 
+    def _get_arrow(self):
+        read_success = False
+        read_trials = 0
+        while (not read_success) and (read_trials < 3):
+            try:
+                df = pa_parquet.read_table(self.path)
+                df = pl.from_arrow(df)
+                read_success = True
+
+            except (pa.lib.ArrowInvalid, OSError, Exception) as e:
+                #print(e)
+                logger.warning(e)
+                read_trials += 1
+
+        if read_success:
+            return df
+        else:
+            raise Exception('could not read table')
+
     def get(self, filtro=None):
 
-        if filtro is None:
-            df = pl.scan_parquet(self.path).collect()
-        else:
-            df = pl.scan_parquet(self.path).filter(filtro).collect()
-        return df
+        with self.lock:
+
+            if filtro is None:
+                # df = pl.scan_parquet(self.path).collect()
+                # df = pl.read_parquet(self.path)
+                df = self._get_arrow()
+            else:
+                df = self._get_arrow().filter(filtro)
+                # df = pl.scan_parquet(self.path).filter(filtro).collect()
+            return df
 
     def get_lazy(self):
-
-        return pl.scan_parquet(self.path)
+        with self.lock:
+            # df = pl.scan_parquet(self.path)
+            df = self._get_arrow().lazy()
+            return df
 
     def get_lastdate(self, col_name='timestamp'):
         """
@@ -89,8 +121,15 @@ class ParquetHandler:
             trials += 1
 
         with self.lock:
-            new_df.write_parquet(self.path)
-
+            written_flag = False
+            write_trials = 0
+            while (not written_flag) and (write_trials < 3):
+                try:
+                    new_df.write_parquet(self.path)
+                    written_flag = True
+                except Exception as e:
+                    print(e)
+                    write_trials += 1
 
     def get_start_ts(self, event_timestamp_, timestamp_col='timestamp') -> pl.Series:
         """
@@ -190,19 +229,29 @@ class PositionHandler:
 
         ts_to_update = self.cash.get_ts_to_update(event_ts)
 
-        p_equity_temp = (
-            self.p_equity
-            .get((pl.col('date') >= ts_to_update[0])
-                    & (pl.col('date') <= ts_to_update[-1]))
-            .rename({'date': 'timestamp'})
-            .with_columns(timestamp=pl.col('timestamp').dt.cast_time_unit('us'))
-        )
+        price_request_success = False
+        while not price_request_success:
+            try:
+                p_equity_temp = (
+                    self.p_equity.get()
+                    # .get((pl.col('date') >= ts_to_update[0])
+                    #         & (pl.col('date') <= ts_to_update[-1]))
+                    .filter((pl.col('date') >= ts_to_update[0])
+                            & (pl.col('date') <= ts_to_update[-1]))
+                    .rename({'date': 'timestamp'})
+                    .with_columns(timestamp=pl.col('timestamp').dt.cast_time_unit('us'))
+                )
+                price_request_success = True
+            except (OSError, pl.exceptions.ComputeError, ) as e:
+                print('catched an error')
+                print(e)
+                continue
 
         agg_position = []
         agg_position_cash = []
         for ts_index in range(1, len(ts_to_update)):
 
-            fills_filtered = self.fills.fills_processing(
+            fills_filtered = self.fills_processing(
                 date_start=ts_to_update[ts_index - 1],
                 date_end=ts_to_update[ts_index])
 
@@ -252,16 +301,13 @@ class PositionHandler:
                     .then(pl.when(~pl.col('trade_avgPrice').is_null())
                           .then(pl.lit('trade'))
                           .otherwise(pl.lit('last_mtm')))
-                    .otherwise(pl.lit('vector'))
-                )
+                    .otherwise(pl.lit('vector')))
                 .with_columns(
                     mtm=pl.col('price') * pl.col('amount'),
-                    pnl=pl.col('price') * pl.col('amount') - pl.col('trade_cost_basis') - pl.col('mtm_prev')
-                )
+                    pnl=pl.col('price') * pl.col('amount') - pl.col('trade_cost_basis') - pl.col('mtm_prev'))
                 .with_columns(ret=pl.when(pl.col('amount_prev') == 0.0)
                               .then(pl.col('mtm')/pl.col('trade_cost_basis')-1.0)
                               .otherwise(pl.col.pnl/pl.col.mtm_prev))
-
                 .select(start_position.columns)
             )
 
@@ -346,11 +392,11 @@ class PositionHandler:
                   coalesce=True)
             .with_columns(
                 trade_cost_basis=pl.when(pl.col.typeAlloc == 'amount')
-                                 .then((pl.col.Alloc / pl.col.amount_variation).abs())
-                                 .otherwise(pl.col.Alloc) * pl.col.trade_cost_basis,
+                .then((pl.col.Alloc / pl.col.amount_variation).abs())
+                .otherwise(pl.col.Alloc) * pl.col.trade_cost_basis,
                 amount_variation=pl.when(pl.col.typeAlloc == 'amount')
-                                 .then(pl.col.amount_variation.sign())
-                                 .otherwise(pl.col.amount_variation) * pl.col.Alloc,)
+                .then(pl.col.amount_variation.sign())
+                .otherwise(pl.col.amount_variation) * pl.col.Alloc,)
             .with_columns(
                 trade_avgPrice=pl.col('trade_cost_basis') / pl.col('amount_variation'))
             .select('secType', 'secId', 'trade_cost_basis', 'amount_variation', 'port', 'trade_avgPrice')
@@ -377,5 +423,3 @@ class PositionHandler:
 #     prices_handle={'us_equity': p_equity},
 #     fill_handle=fills,
 #     blot_alloc_handle=blot_alloc)
-
-fills.get()

@@ -25,17 +25,7 @@ dumb_strat = DumbStrat(calibration_date=dt.date(2025, 1, 24),
                        signal_frequency=dt.timedelta(seconds=30))
 
 logger.debug(f'this is{__name__}')
-dumb_strat.connect_db_endpoint(
-    exchange='exchange_data_handler',
-    routing_key='data_csv.equity'
-)
-
+dumb_strat.connect_db_endpoint()
 # dumb_strat.close_db_endpoint()
 
-# dumb_strat.rab_connections['data_handler'].close_threadsafe()
 
-
-# from libs.rabfile import *
-
-# aea = RabbitConnection()
-# aea.channel.queue_declare('xd',arguments={'x-consumer-timeout': 10000})

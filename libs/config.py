@@ -5,8 +5,6 @@ work_path = getcwd().replace('\\', '/')
 db_path = work_path + '/synthetic_server_path'
 
 
-
-
 allowed_trading_apis = ['csv', ]
 # allowed_trading_apis = ['csv', 'ib']
 default_api = allowed_trading_apis[0]
@@ -28,8 +26,8 @@ all_routing_keys = {
     'AutoExecution_server': 'rt_autoexecution_rpc_server',
     'AutoExecution_client': 'rt_autoexecution_rpc_client',
     'AutoPort_DH_endpoint': ['data_csv.*',],
-    'AutoPort_OrderReceiver': {'DumbStrat': 'DumbStrat_SignalSubscription'}
-
+    'AutoPort_OrderReceiver': {'DumbStrat': 'DumbStrat_SignalSubscription'},
+    'DumbStrat_DH_endpoint': 'data_csv.us_equity'
 }
 
 autoport_tables = ['us_equity',
@@ -48,7 +46,18 @@ queue_declarations = {
     'AutoPort_DH_endpoint': {'queue': '',
                             'exclusive': True,
                             'auto_delete': True,
-                            'passive': False}
+                            'passive': False},
+    'AutoPort_OrderReceiver': {
+      'queue': 'autoport_or',
+        'passive': False,
+        'auto_delete': True,
+        'exclusive': True,
+    },
+    'DumbStrat': {'queue': 'dumb',
+                  'passive': False,
+                  'durable': False,
+                  'exclusive': True,
+                  'auto_delete': True}
 }
 
 # hkrkyf760 - @Tomate4

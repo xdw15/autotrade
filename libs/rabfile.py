@@ -30,9 +30,9 @@ class RabbitConnection:
         self.connection = BlockingConnectionA(params)
         self.channel = self.connection.channel()
 
-        logger.info('RabbitMQ connection and channel initialized')
+        logger.debug('RabbitMQ connection and channel initialized')
 
-    def close_connections_threadsafe(self):
+    def close_connection_threadsafe(self):
         self.connection.add_callback_threadsafe(
             self.connection.close
         )

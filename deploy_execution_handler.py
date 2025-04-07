@@ -1,4 +1,4 @@
-from libs.execution_handler import *
+from libs.execution_handler_v2 import *
 import logging
 
 logger = logging.getLogger()
@@ -17,4 +17,7 @@ logger.addHandler(log_stream_handler)
 
 auto_exec = AutoExecution()
 
-auto_exec.update_system()
+#auto_exec.update_system()
+
+
+

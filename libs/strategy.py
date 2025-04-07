@@ -8,7 +8,7 @@ from libs.config import *
 from libs.rabfile import *
 import threading
 import logging
-
+from libs.autoport_utils import *
 logger = logging.getLogger('autotrade.' + __name__)
 
 
@@ -41,80 +41,67 @@ class DumbStrat:
                  ticker: str,
                  signal_frequency: dt.timedelta):
 
-        df = pl.read_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
-        self.day_ma = (
-            df
+        self.df = ParquetHandler(work_path + '/synthetic_server_path/us_equity.parquet')
+        df_filtered = (
+            self.df.get()
             .filter(
                 (pl.col('date').dt.date() == calibration_date)
-                & (pl.col('ticker') == ticker)
-            )
-            ['price']
-            .mean()
+                & (pl.col('ticker') == ticker))
         )
 
-        self.queue_names = {}
-        self.ticker = ticker
-        self.rab_connections = {}
-        self.signal_frequency = signal_frequency or dt.timedelta(seconds=30)
-        self.last_signal_time_stamp = dt.datetime.fromtimestamp(0)
+        self.day_ma = df_filtered['price'].mean()
 
-    def connect_db_endpoint(self,
-                            exchange: str,
-                            routing_key: str = 'data_csv.Equity'):
+        self.ticker = ticker
+        self.signal_frequency = signal_frequency or dt.timedelta(seconds=30)
+        self.last_signal_time_stamp = df_filtered['date'].min()
+        self.thread = threading.Thread()
+
+    def connect_db_endpoint(self):
 
         connection_event = threading.Event()
-        threading.Thread(
+        self.thread = threading.Thread(
             target=self._setup_db_endpoint,
-            args=(exchange,
-                  routing_key,
-                  connection_event)
-        ).start()
+            args=(connection_event, )
+        )
 
-        with threading.Lock():
-            while not connection_event.is_set():
-                pass
+        self.thread.start()
 
-        logger.debug('consumer started')
+        while not connection_event.is_set():
+            pass
+
+        logger.info('DumbStrat db_endpoint con started')
 
     def close_db_endpoint(self):
-
-        if self.rab_connections['data_handler'].is_open:
-
-            self.rab_connections['data_handler'].add_callback_threadsafe(
-                self.rab_connections['data_handler'].close
-            )
+        if self.rab_con.connection.is_open:
+            self.rab_con.stop_plus_close()
         else:
-            logger.debug('db_endpoint connection already closed')
+            logger.info('DumbStrat db_endpoint con already closed')
 
     def _setup_db_endpoint(self,
-                           exchange: str,
-                           routing_key: str,
-                           connection_event: threading.Event
-                           ):
+                           connection_event: threading.Event):
 
-        rab_con = RabbitConnection()
-        self.rab_connections['data_handler'] = rab_con.connection
+        self.rab_con = RabbitConnection()
         connection_event.set()
 
-        rab_con.channel.exchange_declare(**exchange_declarations['OrderReceiver'])
-        self.queue_names['data_handler'] = f"Strat-{self.__class__.__name__}-{threading.get_ident()}"
-        rab_con.channel.queue_declare(
-            queue=self.queue_names['data_handler'],
-            passive=False,
-            durable=False,
-            exclusive=True,
-            auto_delete=True
+        self.rab_con.channel.exchange_declare(
+            **exchange_declarations['OrderReceiver']
         )
 
-        rab_con.channel.queue_bind(
-            queue=self.queue_names['data_handler'],
-            exchange=exchange,
-            routing_key=routing_key
+        # self.queue_names['data_handler'] = f"Strat-{self.__class__.__name__}-{threading.get_ident()}"
+
+        self.rab_con.channel.queue_declare(
+            **queue_declarations['DumbStrat']
         )
 
-        rab_con.channel.basic_consume(
-            queue=self.queue_names['data_handler'],
-            on_message_callback=self.db_endpoint_callback
+        self.rab_con.channel.queue_bind(
+            queue=queue_declarations['DumbStrat']['queue'],
+            exchange=exchange_declarations['DataHandler']['exchange'],
+            routing_key=all_routing_keys['DumbStrat_DH_endpoint']
+        )
+
+        self.rab_con.channel.basic_consume(
+            queue=queue_declarations['DumbStrat']['queue'],
+            on_message_callback=self.db_endpoint_cllbck
         )
 
         # def consumer_killer():
@@ -122,10 +109,10 @@ class DumbStrat:
         #         rab_con.connection.close
         #     )
 
-        rab_con.channel.start_consuming()
-        logger.debug(f'{rab_con.connection.is_closed=}')
+        self.rab_con.channel.start_consuming()
+        logger.info(f'{self.rab_con.connection.is_closed=}')
 
-    def db_endpoint_callback(self, channel, method, properties, body):
+    def db_endpoint_cllbck(self, channel, method, properties, body):
 
         if properties.content_type != 'application/json':
             channel.basic_nack(method.delivery_tag)
@@ -148,11 +135,13 @@ class DumbStrat:
         del dd, t0, dd1
         # #####
 
-        time_stamp = dt.datetime.strptime(body['time_stamp'], '%Y%m%d%H%M%S')
+        time_stamp = dt.datetime.strptime(body['timestamp'], '%Y%m%d%H%M%S')
 
-        trigger_data_event = ((body['info']['table'] == 'us_equity')
-                                and (self.ticker in body['info']['tickers'])
-                                and (self.last_signal_time_stamp + self.signal_frequency < time_stamp))
+        trigger_data_event = (
+                (body['table_name'] == 'us_equity')
+                and (self.ticker in body['tickers'])
+                and (self.last_signal_time_stamp + self.signal_frequency < time_stamp)
+        )
 
         channel.basic_ack(method.delivery_tag)
 
@@ -160,19 +149,19 @@ class DumbStrat:
             return
 
         current_price = (
-            pl.scan_parquet(work_path + '/synthetic_server_path/us_equity.parquet')
+            self.df.get()
             .filter(
                 (pl.col('date') == time_stamp)
                 & (pl.col('ticker') == self.ticker)
-            ).collect()['price'][0]
+            )['price'][0]
         )
 
         signal_body = {'symbol': self.ticker,
                        'orderType': 'LMT',
                        'lmtPrice': current_price,
-                       'signal_timestamp': body['time_stamp'],
+                       'signal_timestamp': body['timestamp'],
                        'secType': 'STK',
-                       'totalQuantity': 4,
+                       'totalQuantity': 1,
                        # 'portAlloc': {'1': 0.9, '2': 0.1},
                        # 'typeAlloc': 'percent',
                        'portAlloc': {'1': 2, '2': 1},
@@ -180,9 +169,9 @@ class DumbStrat:
         }
 
         if current_price > self.day_ma:
-            signal_body['action'] = "SELL"
+            signal_body['action'] = "BUY" # "SELL"
         elif current_price < self.day_ma:
-            signal_body['action'] = "BUY"
+            signal_body['action'] = "SELL"
 
         logger.info(f"Timestamp: {time_stamp.strftime('%y%m%d-%H:%M:%S')}"
                     + f"-Action: {signal_body['action']} {self.ticker} @ {current_price}")
@@ -191,8 +180,10 @@ class DumbStrat:
             body=json.dumps(signal_body),
             exchange=exchange_declarations['OrderReceiver']['exchange'],
             routing_key=all_routing_keys['AutoPort_OrderReceiver']['DumbStrat'],
-            properties=pika.BasicProperties(content_type='application/json',
-                                            app_id='dumb_strat'))
+            properties=pika.BasicProperties(
+                content_type='application/json',
+                app_id='dumb_strat')
+        )
 
         self.last_signal_time_stamp = time_stamp
 

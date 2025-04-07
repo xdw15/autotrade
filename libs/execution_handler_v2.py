@@ -17,45 +17,56 @@ logger = logging.getLogger('autotrade.' + __name__)
 class FillPublisher:
 
     def __init__(self):
+
         self.start_event = threading.Event()
+        self.switch_rab_con_hb = threading.Event()
+
         self.thread = threading.Thread(
             target=self._setup_fill_publisher,
             args=(self.start_event, ))
         # self._start_fill_publisher()
-        self.flags_rab_con_hb = True
-        self.thread_heartbeat = threading.Thread(
-            target=self._heartbeat_rabcon,
-            args=(self.rab_con,
-                  self.flags_rab_con_hb,
-                  'fill_publisher', ))
-
-    def start(self):
-
         self.thread.start()
 
         with threading.Lock():
             while not self.start_event.is_set():
                 continue
 
-        self.thread_heartbeat.start()
-
-        # 0ta 0ara 0r9bar
-        # para probar otra vez
+        # self.thread_heartbeat = threading.Thread(
+        #     target=self._heartbeat_rabcon,
+        #     args=('fill_publisher', ))
+        #
+        # self.thread_heartbeat.start()
         logger.info('fill_publisher started')
 
-    @staticmethod
-    def _heartbeat_rabcon(con, flag, name, time_limit=1):
+    def _heartbeat_rabcon(self, name, time_limit=1):
 
-        logger.debug(f"{name} heartbeat started")
-        while flag:
-            con.connection.process_data_events(time_limit=time_limit)
-        logger.debug(f"{name} heartbeat finished")
+        logger.info(f"{name} heartbeat started")
 
-    def _setup_fill_publisher(self, _start_event):
+        def fun_hb():
+            return self.rab_con.connection.process_data_events(
+                time_limit=time_limit)
+        while not self.switch_rab_con_hb.is_set():
+            self.rab_con.connection.add_callback_threadsafe(fun_hb)
+
+        logger.info(f"{name} heartbeat finished")
+
+    def _setup_fill_publisher(self, _start_event, time_limit=2):
 
         self.rab_con = RabbitConnection()
 
         _start_event.set()
+
+        while not self.switch_rab_con_hb.is_set():
+            self.rab_con.connection.process_data_events(
+                time_limit=time_limit)
+
+        logger.info(f"FillPublisher stopped")
+
+    def stop(self):
+
+        self.switch_rab_con_hb.set()
+        while self.thread.is_alive():
+            pass
 
 
 class AutoExecRPC:
@@ -63,6 +74,7 @@ class AutoExecRPC:
     def __init__(self, autoexec):
         self.autoexec = autoexec
         # self._start_autoexecuton_rpc_server()
+        self.thread = threading.Thread()
 
     def start(self):
 
@@ -120,6 +132,20 @@ class AutoExecRPC:
         api = self.autoexec.place_order(body)
 
         print(f"order_{body['order_itag']} placed succesfully via api {api}")
+        ch.basic_ack(method.delivery_tag)
+
+    def close(self):
+        if not self.thread.is_alive():
+            logger.info('AutoExecRPC thread is closed already')
+            return
+
+        if self.rab_con.connection.is_open:
+            self.rab_con.stop_plus_close()
+            while self.thread.is_alive():
+                continue
+            logger.info('AutoExecRPC rabcon closed')
+        else:
+            logger.info('AutoExecRPC rabcon closed already')
 
 
 class AutoExecAutoUpdater:
@@ -137,6 +163,7 @@ class AutoExecAutoUpdater:
             args=())
 
         self.thread.start()
+        logger.info('autoupdate started')
         # self._thread_tracker['auto_update'] = t
 
     def _setup_autoupdater(self):
@@ -160,8 +187,11 @@ class IBHandler:
     def __init__(self, autoexec):
         self.autoexec = autoexec
 
-    def connect(self):
         self.ib_con = ib.IB()
+
+    def connect(self):
+
+
         self.ib_con.connect(**ibg_connection_params)
 
         logger.info(f"Connected to IB. ClientId: {ibg_connection_params['clientId']},"
@@ -309,10 +339,13 @@ class IBHandler:
         )
 
         if len(filled_orders) == 0:
-            logger.debug('no trades filled in IB')
+            logger.info('no trades filled in IB')
             return []
 
         return [filled_orders]
+
+    def close(self):
+        self.ib_con.disconnect()
 
 
 class CSVHandler:
@@ -321,15 +354,20 @@ class CSVHandler:
         self.autoexec = autoexec
 
     def connect(self):
-        raise NotImplementedError
+        pass
+        # raise NotImplementedError
 
     def place_order(self, order_info):
-        raise NotImplementedError
+        return []
+        # raise NotImplementedError
 
     def update_fills(self):
         return []
 
     def _connect_db_csv(self):
+        pass
+
+    def close(self):
         pass
 
 
@@ -368,9 +406,17 @@ class AutoExecution:
         # start threads
         self._start_autoexecution()
 
+    def stop_autoexec(self):
+
+        self.place_order_rpc_server.close()
+        self.auto_updater.stop_autoupdate()
+        self.fill_publisher.stop()
+        for api_name in self.client.keys():
+            self.client[api_name].close()
+
     def _start_autoexecution(self):
         self._connect_trading_apis()
-        self.fill_publisher.start()
+        # self.fill_publisher.start()
         self.place_order_rpc_server.start()
         if self.start_auto_update:
             self.auto_updater.start()
@@ -389,15 +435,35 @@ class AutoExecution:
 
         filled_orders = []
         for api_name in allowed_trading_apis:
-            filled_orders.append(
-                self.client[api_name].update_fills()
-            )
-
+            fill_ouput = self.client[api_name].update_fills()
+            if len(fill_ouput) > 0:
+                filled_orders.append(fill_ouput)
 
         if len(filled_orders) == 0:
-            # print('No new fills')
             logger.info(f"no fills for this timestamp")
+
+            # <editor-fold desc="proof of concept">
+            # rab_con = self.fill_publisher.rab_con
+            #
+            # body = {'order_itag': '1231231231',
+            #         'sessionId': self.session_id,
+            #         'fill_timestamps': ['24234234324']*int(1e5)}
+            # body = json.dumps(body)
+            #
+            # def publisher():
+            #     rab_con.channel.basic_publish(
+            #         exchange=exchange_declarations['OrderExecution']['exchange'],
+            #         routing_key='aea',
+            #         body=body,
+            #         properties=pika.BasicProperties(content_type='application/json'))
+            #     logger.info('published message')
+            #
+            # rab_con.connection.add_callback_threadsafe(publisher)
+
+            # </editor-fold>
+
             return
+
 
         # The program is supposed to concat multiple filled orders from several apis
         # in this case there is only one appi so no concat needed
@@ -457,11 +523,13 @@ class AutoExecution:
                     'fill_timestamps': fill_ts}
             body = json.dumps(body)
 
-            def publisher(): return rab_con.channel.basic_publish(
-                exchange=exchange_declarations['OrderExecution']['exchange'],
-                routing_key=reply_to_tag,
-                body=body,
-                properties=pika.BasicProperties(content_type='application/json'))
+            def publisher():
+                rab_con.channel.basic_publish(
+                    exchange=exchange_declarations['OrderExecution']['exchange'],
+                    routing_key=reply_to_tag,
+                    body=body,
+                    properties=pika.BasicProperties(content_type='application/json'))
+                logger.info(f'published msg - {filled_tag}')
 
             rab_con.connection.add_callback_threadsafe(publisher)
 

@@ -43,10 +43,11 @@ class AutoPortDataHandlerEndpoint:
         rab_con_name = 'DH_endpoint'
         if self.rab_con.connection.is_open:
             self.rab_con.stop_plus_close()
-            if self.thread.is_alive():
-                logger.warning(f'{rab_con_name} thread is still alive')
-            else:
-                logger.info(f'{rab_con_name} thread closed succesfully')
+
+            while self.thread.is_alive():
+                continue
+                # logger.warning(f'{rab_con_name} thread is still alive')
+            logger.info(f'{rab_con_name} thread closed succesfully')
         else:
             logger.info(f'{rab_con_name} connection closed already')
 
@@ -87,67 +88,17 @@ class AutoPortDataHandlerEndpoint:
 
         body = json.loads(body)
 
-        if body['table']['name'] not in autoport_tables:
-            logger.info("the event's table name is not in the config")
+        if body['table_name'] not in autoport_tables:
+            logger.warning("the event's table name is not in the config")
             return
 
-        self.event_queue.put(
-            {'table_name': body['table']['name'],
-             'timestamp': body['timestamp']}
-        )
+        # self.event_queue.put(
+        #     {'table_name': body['table_name'],
+        #      'timestamp': body['timestamp']}
+        # )
+        self.event_queue.put(body)
         ch.basic_ack(method.delivery_tag)
-
-    def db_cllbck(self, ch, method, properties, body):
-        # hay que arreglar esta wevada
-
-        db_directory = {
-            'equity': db_path + '/us_equity.parquet'
-        }
-
-        if properties.content_type != 'application/json':
-            logger.warning('content type not json for message sent to db client')
-            logger.warning('event not processed')
-            ch.basic_nack(method.delivery_tag)
-            return
-
-        ch.basic_ack(method.delivery_tag)
-
-        msg = json.loads(body)
-        msg_security_type = msg['security']['type']
-        msg_securities = body['security']['tickers']
-        msg_time_stamp = dt.datetime.strptime(body['time_stamp'], '%Y%m%d%H%M%S')
-
-        positions_last = (
-            self.positions[msg_security_type]
-            .filter(pl.col('date') == pl.col('date').max())
-        )
-        positions_last_time_stamp = positions_last['date'][0]
-
-        if not ((body['event'] == 'new_data') and (msg_time_stamp > positions_last_time_stamp)):
-            logger.warning(f'event new_data has a time stamp older than last position')
-            logger.warning(f'event not processed')
-            return
-
-        payload_fields = {
-            sec: True if sec in msg_securities else False
-            for sec in positions_last['ticker']}
-
-        if not all(payload_fields.values()):
-            logger.warning('the following tickers are not present in the data sent')
-            logger.warning(f'{[sec for sec, val in payload_fields.items() if val == False]}')
-            logger.warning('event not processed')
-            return
-
-        df = (
-            pl.scan_parquet(db_directory[msg_security_type])
-            .filter(
-                (pl.col('date') == msg_time_stamp)
-                & (pl.col('ticker').is_in(msg_securities)))
-            .collect()
-        )
-
-        self.event_queue['DH_endpoint'].put({'data': df,
-                                             'time_stamp': msg_time_stamp})
+        logger.info("AutoPortDHEndpoint cllbck has routed an event")
 
 
 class AutoExecRPCEndpoint:
@@ -171,30 +122,27 @@ class AutoExecRPCEndpoint:
             continue
 
         # starting the publisher that serves the rpc-publishing part
-        self.flag_rab_con_hb = True
+        self.switch_rab_con_hb = threading.Event()
 
-        self.thread_heartbeat = threading.Thread(
-            target=self._heartbeat_rabcon,
-            args=(self.rab_con,
-                  self.flag_rab_con_hb,
-                  'autoexecution_client'), )
-        self.thread_heartbeat.start()
+        # self.thread_heartbeat = threading.Thread(
+        #     target=self._heartbeat_rabcon,
+        #     args=('autoexecution_client', )
+        # )
+        # self.thread_heartbeat.start()
 
-        logger.info('autoexecution_rpc_client started')
+        logger.info('AutoExecRPC_client started')
 
     def stop_endpoint(self):
-
-        self.flag_rab_con_hb = False
 
         rab_con_name = 'autoexec rpc endpoint'
         if self.rab_con.connection.is_open:
 
             self.rab_con.stop_plus_close()
 
-            if self.thread.is_alive():
-                logger.warning(f'{rab_con_name} thread is still alive')
-            else:
-                logger.info(f'{rab_con_name} thread closed succesfully')
+            while self.thread.is_alive():
+                continue
+            # logger.warning(f'{rab_con_name} thread is still alive')
+            logger.info(f'{rab_con_name} thread closed succesfully')
         else:
             logger.info(f'{rab_con_name} connection closed already')
 
@@ -222,6 +170,8 @@ class AutoExecRPCEndpoint:
             on_message_callback=self._callback_autoexecution,
             auto_ack=False)
 
+        self.rab_con.channel.start_consuming()
+
     def _callback_autoexecution(self, ch, method, properties, body):
         if properties.content_type != 'application/json':
             ch.basic_nack(method.delivery_tag)
@@ -241,12 +191,15 @@ class AutoExecRPCEndpoint:
             new_row=new_row,
             overrides=overrides)
 
+        logger.info(f"Fill confirmation for itag {body['order_itag']} received by RPCEndpoint")
+
         self.event_queue.put(body['fill_timestamps'])
 
     def order_confirmation(self, body):
 
         self.autoport.order_counter += 1
-        body['order_itag'] = (body['time_stamp'][2:]
+        # esto viene de strategy por eso es signal
+        body['order_itag'] = (body['signal_timestamp'][2:8]
                               + f'{self.autoport.order_counter:0>8}')
 
         # update blotter
@@ -263,7 +216,8 @@ class AutoExecRPCEndpoint:
                      # 'typeAlloc': body['typeAlloc'],
         }
 
-        overrides = {'timestamp': pl.Datetime(time_unit='ms')}
+        overrides = {'timestamp': pl.Datetime(time_unit='ms'),
+                     'tradeQty': pl.Float64}
 
         self.autoport.blot.update(
             new_row=blot_newrow,
@@ -274,12 +228,14 @@ class AutoExecRPCEndpoint:
         new_row = []
         for port_key in body['portAlloc']:
             dic_unnested = {'timestamp': blot_newrow['timestamp'],
-                            'order_itag': blot_newrow['order_itag'],
+                            'order_itag': body['order_itag'],
                             'port': port_key,
                             'Alloc': body['portAlloc'][port_key],
-                            'typeAlloc': blot_newrow['typeAlloc']}
+                            'typeAlloc': body['typeAlloc']}
             new_row.append(dic_unnested)
 
+        overrides = {'timestamp': pl.Datetime(time_unit='ms'),
+                     'Alloc': pl.Float64}
         self.autoport.blot_alloc.update(
             new_row=new_row,
             overrides=overrides)
@@ -291,20 +247,20 @@ class AutoExecRPCEndpoint:
                    'note': '',
                    'timestamp': dt.datetime.now()}
 
-        self.autoport.blot_alloc.update(
+        self.autoport.blot_log.update(
             new_row=new_row,
             overrides=overrides)
 
         # order dispatched to risk manager
 
-        logger.debug(f"order_{body['order_itag']} passed to risk_manager for confirmation")
+        logger.info(f"order_{body['order_itag']} passed to risk_manager for confirmation")
         rm_output = self.autoport.risk_manager.confirm_trade(body)
 
         if rm_output['result'] is False:
 
             # update blotter log
-            new_row = {'order_id': body['order_itag'],
-                       'status': 'deniedByRM',
+            new_row = {'order_itag': body['order_itag'],
+                       'status': 'deniedByRiskManager',
                        'note': '',
                        'timestamp': dt.datetime.now()}
 
@@ -316,7 +272,7 @@ class AutoExecRPCEndpoint:
 
         rab_con = self.rab_con
 
-        if rab_con.connection.is_closed():
+        if rab_con.connection.is_closed:
             logger.warning(f"order_{body['order_itag']} can't be confirmed."
                            + f"AutoExecution client is not open or doesn't exist")
 
@@ -349,7 +305,7 @@ class AutoExecRPCEndpoint:
         )
 
         # update blotter log
-        new_row = {'order_id': body['order_itag'],
+        new_row = {'order_itag': body['order_itag'],
                    'status': 'dispatchedToAutoExec',
                    'note': '', 'timestamp': dt.datetime.now()}
 
@@ -357,15 +313,15 @@ class AutoExecRPCEndpoint:
             new_row=new_row,
             overrides=overrides)
 
-        logger.debug(f"order_{body['order_itag']} confirmed and dispatched for execution")
+        logger.info(f"order_{body['order_itag']} confirmed and dispatched for execution")
 
-    @staticmethod
-    def _heartbeat_rabcon(con, flag, name, time_limit=1):
-
-        logger.debug(f"{name} heartbeat started")
-        while flag:
-            con.connection.process_data_events(time_limit=time_limit)
-        logger.debug(f"{name} heartbeat finished")
+    # def _heartbeat_rabcon(self, name, time_limit=1):
+    #
+    #     logger.debug(f"{name} heartbeat started")
+    #     while not self.switch_rab_con_hb.is_set():
+    #         self.rab_con.connection.process_data_events(
+    #             time_limit=time_limit)
+    #     logger.debug(f"{name} heartbeat finished")
 
 
 class OrderReceiver:
@@ -387,6 +343,18 @@ class OrderReceiver:
             pass
         logger.info('OrderReceiver endpoint started')
 
+    def stop(self):
+
+        if not self.thread.is_alive():
+            logger.info('OrderReceiver thread dead already')
+        if self.rab_con.connection.is_open:
+            self.rab_con.stop_plus_close()
+            while self.thread.is_alive():
+                continue
+            logger.info('OrderReceiver rabcon closed')
+        else:
+            logger.info('OrderReceiver rabcon closed already')
+
     def _setup_order_receiver_endpoint(self,
                                        connection_event):
 
@@ -394,14 +362,14 @@ class OrderReceiver:
         self.rab_con.channel.exchange_declare(
             **exchange_declarations["OrderReceiver"])
         queue_declare = self.rab_con.channel.queue_declare(
-            **queue_declarations['OrderReceiver'])
+            **queue_declarations['AutoPort_OrderReceiver'])
 
         queue_declare = queue_declare.method.queue
 
         deque(
             (self.rab_con.channel.queue_bind(
                 queue=queue_declare,
-                exchange=exchange_declarations['OrderReceiver'],
+                exchange=exchange_declarations['OrderReceiver']['exchange'],
                 routing_key=routing_key)
                 for routing_key
                 in all_routing_keys['AutoPort_OrderReceiver'].values()),
@@ -419,8 +387,9 @@ class OrderReceiver:
 
     def _order_receiver_cllbck(self, ch, method, properties, body):
 
+        logger.info("OrderReceiver cllbck got called")
         if properties.content_type != 'application/json':
-            logger.warning("an order sent to this application was not processed")
+            logger.warning("an order sent to OrderReceiver was not processed")
             ch.basic_nack(method.delivery_tag)
             return
 
@@ -436,16 +405,20 @@ class OrderReceiver:
 class AutoRiskManager:
     def __init__(self, auto_portfolio):
         self.autoport = auto_portfolio
-        self.pass_through_orders = False
+        self.pass_through_orders = True
         logger.info('Risk Manager started')
 
         self.order_confirmations = {}
 
     def confirm_trade(self, order):
         if order['secType'] == 'STK':
-            self.confirm_trade_stk(order)
+            output = self.confirm_trade_stk(order)
+            logger.info(f"order_{order['order_itag']} processed by RM")
         else:
-            logger.warning(f"order_{order['order_itag']} not processed, secType not supported")
+            output = {'result': False}
+            logger.warning(f"order_{order['order_itag']} not processed by RM, secType not supported")
+
+        return output
 
     def confirm_trade_stk(self, order):
         output = {'result': True}
@@ -465,7 +438,7 @@ class AutoRiskManager:
                       'totalQuantity': order['totalQuantity'],  # for now
                       'lmtPrice': order['lmtPrice'],
                       'secType': order['secType'],
-                      'origination_time_stamp': order['time_stamp'],
+                      'origination_time_stamp': order['signal_timestamp'],
                       'confirmation_time_stamp': dt.datetime.now().strftime('%y%m%d%H%M%S'),
                       'order_itag': order['order_itag']}
 
@@ -473,16 +446,26 @@ class AutoRiskManager:
 
         return output
 
-class AutoUpdatePort:
 
+class AutoUpdatePort:
     def __init__(self, autoport, freq):
 
         self.autoport = autoport
         self.switch_event = threading.Event()
         self.freq = freq
+        self.thread = threading.Thread()
+        self.thread_auto_restart = threading.Thread()
 
     def start(self):
 
+        self.start_main()
+        self.thread_auto_restart = threading.Thread(
+            target=self.auto_restart,
+            args=()
+        )
+        # self.thread_auto_restart.start()
+
+    def start_main(self):
         self.switch_event.clear()
         self.thread = threading.Thread(
             target=self._setup_autoupdate,
@@ -491,12 +474,25 @@ class AutoUpdatePort:
 
         self.thread.start()
 
-        print(f"AutoUpdate started")
-    def _setup_autoupdate(self):
+        logger.info(f"AutoUpdate started")
+
+    def auto_restart(self):
+
+        logger.info('AutoUpdatePort autorestart started')
 
         while not self.switch_event.is_set():
+            if not self.thread.is_alive():
+                self.start_main()
+                logger.warning('AutoUpdatePort restarted')
+
+        logger.info('AutoUpdatePort autorestart finished')
+
+    def _setup_autoupdate(self):
+        while not self.switch_event.is_set():
+            logger.debug('Calling update portfolio from AutoUpdate')
             self.autoport.update_portfolio()
             time.sleep(self.freq)
+
     def stop(self):
 
         self.switch_event.set()
@@ -504,7 +500,8 @@ class AutoUpdatePort:
         while self.thread.is_alive():
             continue
 
-        print(f"AutoUpdate stopped")
+        logger.info(f"AutoUpdate stopped")
+
 
 class ToyPortfolio:
     """
@@ -513,12 +510,12 @@ class ToyPortfolio:
 
     def __init__(self,
                  start_timestamp,
-                 start_auto_update = True,
-                 freq_auto_update = 10,
-                 price_ccy = 'USD'):
+                 start_auto_update=True,
+                 freq_auto_update=10,
+                 price_ccy='USD'):
         """
         the class is a system that manages the updating
-        of the holdings (securities and cash) and calculations (pnl, mtm, etc) tables
+        of the holdings (securities and cash) and calculations (pnl, mtm, etc.) tables
         in the context of subapplications generating live events.
         the existing subapps are
         - db client: receives data events to update the valuations
@@ -540,12 +537,48 @@ class ToyPortfolio:
         self.orders = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/order_record.parquet')
         self.fills = ParquetHandler(work_path + '/synthetic_server_path/auto_exec/fill_record.parquet')
 
-        self.blot = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter.parquet')
-        self.blot_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_log.parquet')
-        self.blot_alloc = ParquetHandler(work_path + '/synthetic_server_path/auto_port/blotter_alloc.parquet')
+        self.blot = ParquetHandler(work_path + '/synthetic_server_path/auto_port/mock_blotter.parquet')
+        self.blot_log = ParquetHandler(work_path + '/synthetic_server_path/auto_port/mock_blotter_log.parquet')
+        self.blot_alloc = ParquetHandler(work_path + '/synthetic_server_path/auto_port/mock_blotter_alloc.parquet')
 
-        self.q_equity = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/mock_equity.parquet')
-        self.q_cash = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/mock_cash.parquet')
+        blot_alloc = ParquetHandler(work_path + '/synthetic_server_path/auto_port/mock_blotter_alloc.parquet')
+
+        (
+            self.blot.get()
+            .filter(pl.col.order_itag == '250220' + '0'*7 + '1')
+            # .write_parquet(work_path + '/synthetic_server_path/auto_port/mock_blotter.parquet')
+            .write_parquet(self.blot.path)
+        )
+
+        (
+            self.blot_log.get()
+            .filter(pl.col.order_itag == '250220' + '0' * 7 + '1')
+            # .write_parquet(work_path + '/synthetic_server_path/auto_port/mock_blotter_log.parquet')
+            .write_parquet(self.blot_log.path)
+        )
+
+        (
+            self.blot_alloc.get()
+            .filter(pl.col.timestamp.dt.date() == dt.date(2025, 2, 20))
+            # .write_parquet(work_path + '/synthetic_server_path/auto_port/mock_blotter_alloc.parquet')
+            .write_parquet(self.blot_alloc.path)
+        )
+
+        self.q_equity = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/mock_equity2.parquet')
+        self.q_cash = ParquetHandler(work_path + '/synthetic_server_path/auto_port/holdings/mock_cash2.parquet')
+
+        (
+            self.q_cash.get()[:3]
+            .with_columns(
+                timestamp=pl.lit(start_timestamp).cast(pl.Datetime(time_unit='ms')))
+            .write_parquet(self.q_cash.path)
+        )
+
+        (
+            self.q_equity.get()
+            .filter(pl.col('port') == 'jaja')
+            .write_parquet(self.q_equity.path)
+        )
 
         self.p_equity = ParquetHandler(work_path + '/synthetic_server_path/us_equity.parquet')
 
@@ -578,11 +611,12 @@ class ToyPortfolio:
         self.rpc_endpoint = AutoExecRPCEndpoint(self, self.q_fill_event)
         self.order_receiver = OrderReceiver(self)
         self.risk_manager = AutoRiskManager(self)
-        self.auto_update = AutoUpdatePort(self)
+        self.auto_update = AutoUpdatePort(self, self.freq_auto_update)
 
         if start_auto_update:
 
             self.auto_update.start()
+
         # ----------
 
         # self.positions = self._init_composition(
@@ -590,25 +624,42 @@ class ToyPortfolio:
         #     time_stamp
         # )
 
-    def update_portfolio(self):
+    def stop_autoport(self):
+        t0 = time.perf_counter()
+        self.order_receiver.stop()
+        logger.warning(f"OrderReceiver stopped in {time.perf_counter() - t0:,.2f}")
+        t0 = time.perf_counter()
+        self.rpc_endpoint.stop_endpoint()
+        logger.warning(f"RPCendpoint stopped in {time.perf_counter() - t0:,.2f}")
+        t0 = time.perf_counter()
+        self.dh_endpoint.close_db_endpoint()
+        logger.warning(f"dh_endpoint closed in {time.perf_counter() - t0:,.2f}")
+        t0 = time.perf_counter()
+        self.auto_update.stop()
+        logger.warning(f"auto_update stopped in {time.perf_counter() - t0:,.2f}")
 
+    def update_portfolio(self):
         events_data = self.process_data_queue()
         events_fill = self.process_fill_queue()
-
         events = pl.concat([events_data, events_fill])
 
         if len(events) == 0:
-            return
-
-        self.pos_handler.update_tables(events)
+            logger.info('no events')
+        else:
+            t0 = time.perf_counter()
+            self.pos_handler.update_tables(events)
+            logger.info(f"Events ({len(events)}) from: {events.min().strftime('%y%m%d-%H:%M:%S')}"
+                        + f"to {events.max().strftime('%y%m%d-%H:%M:%S')}")
+            print(f"after updated table took {time.perf_counter()-t0:.2f} secs")
 
         timestamp = dt.datetime.now()
-        print(f"AutoPort updated - {timestamp.strftime('%y%m%d-%H:%M:%S')}")
+        logger.info(f"AutoPort updated - timestamp:{timestamp.strftime('%y%m%d-%H:%M:%S')}")
 
     def process_fill_queue(self):
-        empty_event = False
         event_list = self.empty_queue(self.q_fill_event)
+        logger.debug('Fills queue checked')
         if len(event_list) == 0:
+            logger.debug('No fills in queue')
             return pl.Series([], dtype=pl.Datetime(time_unit='ms'))
 
         filled_tags = []
@@ -625,15 +676,17 @@ class ToyPortfolio:
         series = pl.Series(fill_timestamps, dtype=pl.Datetime(time_unit='ms'))
 
         return series
+
     def process_data_queue(self):
 
         event_list = self.empty_queue(self.q_data_event)
-
+        logger.debug("data queue checked")
         pl.concat(items=[pl.Series([], dtype=pl.Datetime(time_unit='ms')),
                          pl.Series([dt.datetime.now()], dtype=pl.Datetime(time_unit='ms'))])
 
         pl.Series([dt.datetime.now()], dtype=pl.Datetime(time_unit='ms')).sort(descending=False)
         if len(event_list) == 0:
+            logger.debug("no data events in queue")
             return pl.Series([], dtype=pl.Datetime(time_unit='ms'))
 
         event_list = [{k: msg[k]
@@ -647,19 +700,22 @@ class ToyPortfolio:
         dates = list(set([d['timestamp'] for d in event_list]))
 
         series = pl.Series(
-            [dt.datetime.strptime(dte, '%y%m%d%H%M%S')
+            [dt.datetime.strptime(dte, '%Y%m%d%H%M%S')
              for dte in dates], dtype=pl.Datetime(time_unit='ms')
         )
 
         return series
 
     @staticmethod
-    def empty_queue(cola):
+    def empty_queue(cola, max_event_size=1e10):
         empty_event = False
         event_list = []
-        while not empty_event:
+        event_size = 0
+        while (not empty_event) and (event_size < max_event_size):
             try:
                 event_list.append(cola.get(block=False))
+                cola.task_done()
+                event_size += 1
             except queue.Empty:
                 empty_event = True
         return event_list
